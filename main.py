@@ -5,7 +5,7 @@ import time
 import threading
 import datetime
 import pyrebase
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ParseMode
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler, CallbackQueryHandler
 
 # === Firebase Configuration ===
@@ -27,8 +27,8 @@ ASK_AMOUNT, ASK_NAME, VERIFYING = range(3)
 
 # === Welcome + Collect Amount ===
 def start(update: Update, context: CallbackContext):
-    context.bot.send_message(chat_id=update.effective_chat.id, text="👋 *Welcome to PayVery!*\n\n💰 How much would you like to pay?", parse_mode=ParseMode.MARKDOWN)
     delete_previous_messages(context)
+    context.bot.send_message(chat_id=update.effective_chat.id, text="👋 *Welcome to PayVery!*\n\n💰 How much would you like to pay?", parse_mode=ParseMode.MARKDOWN)
     return ASK_AMOUNT
 
 # === Collect Name ===
@@ -43,7 +43,7 @@ def ask_name(update: Update, context: CallbackContext):
         update.message.reply_text("⚠️ Please enter a valid amount in numbers only.")
         return ASK_AMOUNT
 
-# === Display QR and Start Verifying ===
+# === Show QR and start monitoring ===
 def show_qr_and_verify(update: Update, context: CallbackContext):
     name = update.message.text.strip()
     amount = context.user_data.get("amount")
@@ -65,41 +65,51 @@ def show_qr_and_verify(update: Update, context: CallbackContext):
     context.user_data["checking_msg"] = checking_msg.message_id
 
     threading.Thread(target=monitor_payment_and_reply, args=(update, context, name, amount), daemon=True).start()
-
     return VERIFYING
 
-# === Monitor Firebase for 5 min ===
+# === Extract data from raw SMS messages in Firebase ===
+def extract_valid_payments():
+    raw_data = db.child("raw_sms").get().val()
+    valid_payments = []
+    if raw_data:
+        for key, sms in raw_data.items():
+            if "received rs." in sms.lower() and "via" in sms.lower():
+                match = re.search(r"received\s+rs\.\s*([0-9]+\.?[0-9]*)[^\d]+from\s+([a-zA-Z\s]+)", sms, re.IGNORECASE)
+                if match:
+                    amount = float(match.group(1))
+                    name = match.group(2).strip()
+                    valid_payments.append({"id": key, "name": name, "amount": amount})
+    return valid_payments
+
+# === Monitor for matching payment ===
 def monitor_payment_and_reply(update, context, name, amount):
     user_id = update.message.chat_id
     found = False
 
     for _ in range(30):
         time.sleep(10)
-        payments = db.child("verified_payments").get().val()
-        if payments:
-            for key, record in payments.items():
-                record_name = record.get("name", "").lower().split()[0]
-                if (record_name == name.lower().split()[0] and
-                    abs(record.get("amount", 0) - amount) < 0.01):
+        payments = extract_valid_payments()
+        for payment in payments:
+            record_name = payment["name"].lower().split()[0]
+            if record_name == name.lower().split()[0] and abs(payment["amount"] - amount) < 0.01:
+                now = datetime.datetime.now()
+                timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
 
-                    now = datetime.datetime.now()
-                    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+                # Delete the SMS record to avoid re-verification
+                db.child("raw_sms").child(payment["id"]).remove()
 
-                    # Delete payment from database to prevent re-verification
-                    db.child("verified_payments").child(key).remove()
+                try:
+                    context.bot.delete_message(chat_id=user_id, message_id=context.user_data.get("checking_msg"))
+                except:
+                    pass
 
-                    try:
-                        context.bot.delete_message(chat_id=user_id, message_id=context.user_data.get("checking_msg"))
-                    except:
-                        pass
-
-                    context.bot.send_message(
-                        chat_id=user_id,
-                        text=f"✅ *Payment Verified Successfully!*\n\n📄 *Invoice Details:*\n*Name:* `{record.get('name')}`\n*Amount:* ₹{record.get('amount')}\n🕒 *Verified At:* {timestamp}\n\n✅ _Thank you for your payment via PayVery!_",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                    found = True
-                    return
+                context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✅ *Payment Verified Successfully!*\n\n📄 *Invoice Details:*\n*Name:* `{payment['name']}`\n*Amount:* ₹{payment['amount']}\n🕒 *Verified At:* {timestamp}\n\n✅ _Thank you for your payment via PayVery!_",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                found = True
+                return
 
     if not found:
         try:
@@ -110,29 +120,25 @@ def monitor_payment_and_reply(update, context, name, amount):
         reply_markup = InlineKeyboardMarkup(button)
         context.bot.send_message(chat_id=user_id, text="⏳ *Payment not found within 5 minutes.*", parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
 
-# === Handle Retry Button ===
+# === Verify Again Button ===
 def verify_again(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
     _, name, amount = query.data.split("|")
     amount = float(amount)
-    payments = db.child("verified_payments").get().val()
+    payments = extract_valid_payments()
 
-    if payments:
-        for key, record in payments.items():
-            record_name = record.get("name", "").lower().split()[0]
-            if (record_name == name.lower().split()[0] and
-                abs(record.get("amount", 0) - amount) < 0.01):
-
-                now = datetime.datetime.now()
-                timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-                db.child("verified_payments").child(key).remove()
-
-                query.edit_message_text(
-                    f"✅ *Payment Verified Successfully!*\n\n📄 *Invoice Details:*\n*Name:* `{record.get('name')}`\n*Amount:* ₹{record.get('amount')}\n🕒 *Verified At:* {timestamp}\n\n✅ _Thank you for your payment via PayVery!_",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
+    for payment in payments:
+        record_name = payment["name"].lower().split()[0]
+        if record_name == name.lower().split()[0] and abs(payment["amount"] - amount) < 0.01:
+            now = datetime.datetime.now()
+            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            db.child("raw_sms").child(payment["id"]).remove()
+            query.edit_message_text(
+                f"✅ *Payment Verified Successfully!*\n\n📄 *Invoice Details:*\n*Name:* `{payment['name']}`\n*Amount:* ₹{payment['amount']}\n🕒 *Verified At:* {timestamp}\n\n✅ _Thank you for your payment via PayVery!_",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
 
     query.edit_message_text("❌ *Still no matching payment found.* Please ensure the name and amount are correct.", parse_mode=ParseMode.MARKDOWN)
 
