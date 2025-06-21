@@ -1,4 +1,3 @@
-import os
 import re
 import json
 import datetime
@@ -9,7 +8,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Conve
 
 # === Firebase Configuration ===
 firebase_config = {
-    "apiKey": "FAKE-KEY",  # Optional: used for Firebase Auth (not needed here)
+    "apiKey": "FAKE-KEY",  # Optional
     "authDomain": "payvari.firebaseapp.com",
     "databaseURL": "https://payvari-default-rtdb.firebaseio.com/",
     "storageBucket": "payvari.appspot.com"
@@ -18,8 +17,8 @@ firebase_config = {
 firebase = pyrebase.initialize_app(firebase_config)
 db = firebase.database()
 
-# === Load Telegram Token from Environment Variable ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# === Hardcoded Telegram Token ===
+TELEGRAM_TOKEN = "7651343412:AAHmHZWDhgDMGLcqtGKBi-r8M7pVvzJ_baY"
 
 # === Conversation States ===
 ASK_NAME, ASK_AMOUNT, ASK_DATE = range(3)
