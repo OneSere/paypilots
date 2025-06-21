@@ -1,16 +1,15 @@
-# payment_bot.py
 import os
 import re
-import time
-import threading
+import json
 import datetime
+import threading
 import pyrebase
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
 
 # === Firebase Configuration ===
 firebase_config = {
-    "apiKey": "FAKE-KEY",
+    "apiKey": "FAKE-KEY",  # Optional: used for Firebase Auth (not needed here)
     "authDomain": "payvari.firebaseapp.com",
     "databaseURL": "https://payvari-default-rtdb.firebaseio.com/",
     "storageBucket": "payvari.appspot.com"
@@ -19,83 +18,84 @@ firebase_config = {
 firebase = pyrebase.initialize_app(firebase_config)
 db = firebase.database()
 
-# === Telegram Token ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "7651343412:AAHmHZWDhgDMGLcqtGKBi-r8M7pVvzJ_baY"
+# === Load Telegram Token from Environment Variable ===
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# === States ===
-ASK_AMOUNT, ASK_NAME, VERIFYING = range(3)
+# === Conversation States ===
+ASK_NAME, ASK_AMOUNT, ASK_DATE = range(3)
 
-# === Welcome + Collect Amount ===
+# === Extract payment details from SMS ===
+def parse_sms(message):
+    match = re.search(r"received\s+Rs\.?\s*([\d.]+).*?from\s+(.+?)\.", message, re.IGNORECASE)
+    if match:
+        amount = float(match.group(1))
+        name = match.group(2).strip()
+        date = datetime.datetime.now().strftime('%Y-%m-%d')
+        return {"name": name, "amount": amount, "date": date}
+    return None
+
+# === Monitor and move SMS to verified_payments ===
+def monitor_sms():
+    while True:
+        try:
+            all_sms = db.child("sms_messages").get().val()
+            if all_sms:
+                for key, value in all_sms.items():
+                    msg = value.get("message", "")
+                    parsed = parse_sms(msg)
+                    if parsed:
+                        db.child("verified_payments").push(parsed)
+                    db.child("sms_messages").child(key).remove()
+        except Exception as e:
+            print(f"[monitor_sms] Error: {e}")
+        import time
+        time.sleep(10)
+
+# === Telegram Bot Handlers ===
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("\U0001F44B Welcome to the Payment Verification Bot!\n\nHow much would you like to pay (in ₹)?")
+    update.message.reply_text("Welcome to Payment Verification Bot.\nEnter payer name:")
+    return ASK_NAME
+
+def ask_name(update: Update, context: CallbackContext):
+    context.user_data["name"] = update.message.text.strip()
+    update.message.reply_text("Enter amount paid:")
     return ASK_AMOUNT
 
-# === Collect Name ===
-def ask_name(update: Update, context: CallbackContext):
+def ask_amount(update: Update, context: CallbackContext):
     try:
         context.user_data["amount"] = float(update.message.text.strip())
-        update.message.reply_text("Please enter your name (as on UPI app):")
-        return ASK_NAME
+        update.message.reply_text("Enter payment date (YYYY-MM-DD):")
+        return ASK_DATE
     except ValueError:
-        update.message.reply_text("Please enter a valid amount (in numbers):")
+        update.message.reply_text("Invalid amount. Try again:")
         return ASK_AMOUNT
 
-# === Display QR and Start Verifying ===
-def show_qr_and_verify(update: Update, context: CallbackContext):
-    context.user_data["name"] = update.message.text.strip()
-    amount = context.user_data["amount"]
+def ask_date(update: Update, context: CallbackContext):
+    context.user_data["date"] = update.message.text.strip()
     name = context.user_data["name"]
+    amount = context.user_data["amount"]
+    date = context.user_data["date"]
 
-    qr_path = "qrphoto.jpg"  # Should exist in Railway project folder
-    upi_id = "9351044618@mbk"
-
-    update.message.reply_photo(open(qr_path, 'rb'), caption=f"\u2B06\uFE0F *Scan to Pay*\n\nSend *₹{amount}* to UPI ID: `{upi_id}`\nPayment will verify instantly!", parse_mode='Markdown')
-
-    # Start 5-min monitor thread
-    threading.Thread(target=monitor_payment_and_reply, args=(update, context, name, amount), daemon=True).start()
-
-    return VERIFYING
-
-# === Monitor Firebase for 5 min ===
-def monitor_payment_and_reply(update, context, name, amount):
-    user_id = update.message.chat_id
-    matched = False
-    for _ in range(30):  # Check every 10s for 5 mins
-        time.sleep(10)
+    try:
         payments = db.child("verified_payments").get().val()
         if payments:
-            for record in payments.values():
-                if (record["name"].lower() == name.lower()
-                    and abs(record["amount"] - amount) < 0.01):
-                    context.bot.send_message(chat_id=user_id, text=f"\u2705 *Payment of ₹{amount} received successfully!*", parse_mode='Markdown')
-                    return
+            for p in payments.values():
+                if (p["name"].lower() == name.lower()
+                        and abs(p["amount"] - amount) < 0.01
+                        and p["date"] == date):
+                    update.message.reply_text("✅ Payment Verified!")
+                    return ConversationHandler.END
+    except:
+        pass
 
-    # If not matched after 5 min, show retry button
-    button = [[InlineKeyboardButton("Verify Again", callback_data=f"verify|{name}|{amount}")]]
-    reply_markup = InlineKeyboardMarkup(button)
-    context.bot.send_message(chat_id=user_id, text="⏱️ Payment not verified within 5 minutes.", reply_markup=reply_markup)
-
-# === Handle Retry Button ===
-def verify_again(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-    _, name, amount = query.data.split("|")
-    amount = float(amount)
-    payments = db.child("verified_payments").get().val()
-    if payments:
-        for record in payments.values():
-            if (record["name"].lower() == name.lower()
-                and abs(record["amount"] - amount) < 0.01):
-                query.edit_message_text(f"\u2705 *Payment of ₹{amount} received successfully!*", parse_mode='Markdown')
-                return
-    query.edit_message_text("❌ Still no payment found. Please try again later or contact support.")
-
-# === Cancel Command ===
-def cancel(update: Update, context: CallbackContext):
-    update.message.reply_text("Cancelled.")
+    update.message.reply_text("❌ Payment not found.")
     return ConversationHandler.END
 
-# === Main ===
+def cancel(update: Update, context: CallbackContext):
+    update.message.reply_text("Verification canceled.")
+    return ConversationHandler.END
+
+# === Main Execution ===
 def main():
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
@@ -103,18 +103,21 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ASK_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, ask_name)],
-            ASK_NAME: [MessageHandler(Filters.text & ~Filters.command, show_qr_and_verify)],
-            VERIFYING: []  # No user input handled during this
+            ASK_NAME: [MessageHandler(Filters.text & ~Filters.command, ask_name)],
+            ASK_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, ask_amount)],
+            ASK_DATE: [MessageHandler(Filters.text & ~Filters.command, ask_date)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     dp.add_handler(conv_handler)
-    dp.add_handler(CallbackQueryHandler(verify_again, pattern=r"^verify\|"))
+
+    # Start Firebase monitoring in background thread
+    threading.Thread(target=monitor_sms, daemon=True).start()
 
     updater.start_polling()
+    print("🤖 Bot is running...")
     updater.idle()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
