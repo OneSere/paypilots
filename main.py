@@ -78,9 +78,6 @@ def monitor_payment_and_reply(update, context, name, amount):
         payments = db.child("verified_payments").get().val()
         if payments:
             for key, record in payments.items():
-                if record.get("verified", False):
-                    continue
-
                 record_name = record.get("name", "").lower().split()[0]
                 if (record_name == name.lower().split()[0] and
                     abs(record.get("amount", 0) - amount) < 0.01):
@@ -88,7 +85,8 @@ def monitor_payment_and_reply(update, context, name, amount):
                     now = datetime.datetime.now()
                     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
 
-                    db.child("verified_payments").child(key).update({"verified": True})
+                    # Delete payment from database to prevent re-verification
+                    db.child("verified_payments").child(key).remove()
 
                     try:
                         context.bot.delete_message(chat_id=user_id, message_id=context.user_data.get("checking_msg"))
@@ -122,16 +120,13 @@ def verify_again(update: Update, context: CallbackContext):
 
     if payments:
         for key, record in payments.items():
-            if record.get("verified", False):
-                continue
-
             record_name = record.get("name", "").lower().split()[0]
             if (record_name == name.lower().split()[0] and
                 abs(record.get("amount", 0) - amount) < 0.01):
 
                 now = datetime.datetime.now()
                 timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-                db.child("verified_payments").child(key).update({"verified": True})
+                db.child("verified_payments").child(key).remove()
 
                 query.edit_message_text(
                     f"✅ *Payment Verified Successfully!*\n\n📄 *Invoice Details:*\n*Name:* `{record.get('name')}`\n*Amount:* ₹{record.get('amount')}\n🕒 *Verified At:* {timestamp}\n\n✅ _Thank you for your payment via PayVery!_",
