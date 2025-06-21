@@ -5,7 +5,7 @@ import time
 import threading
 import datetime
 import pyrebase
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ParseMode
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler, CallbackQueryHandler
 
 # === Firebase Configuration ===
@@ -20,38 +20,50 @@ firebase = pyrebase.initialize_app(firebase_config)
 db = firebase.database()
 
 # === Telegram Token ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "7651343412:AAHmHZWDhgDMGLcqtGKBi-r8M7pVvzJ_baY"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "YOUR_BOT_TOKEN"
 
 # === States ===
 ASK_AMOUNT, ASK_NAME, VERIFYING = range(3)
 
 # === Welcome + Collect Amount ===
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("\U0001F44B Welcome to the Payment Verification Bot!\n\nHow much would you like to pay (in ₹)?")
+    context.bot.send_message(chat_id=update.effective_chat.id, text="👋 *Welcome to PayVery!*\n\n💰 How much would you like to pay?", parse_mode=ParseMode.MARKDOWN)
+    delete_previous_messages(context)
     return ASK_AMOUNT
 
 # === Collect Name ===
 def ask_name(update: Update, context: CallbackContext):
     try:
         context.user_data["amount"] = float(update.message.text.strip())
-        update.message.reply_text("Please enter your name (as on UPI app):")
+        delete_previous_messages(context)
+        msg = context.bot.send_message(chat_id=update.effective_chat.id, text="✍️ Please enter your *UPI name* (as shown in your app):", parse_mode=ParseMode.MARKDOWN)
+        context.user_data["last_msg"] = msg.message_id
         return ASK_NAME
     except ValueError:
-        update.message.reply_text("Please enter a valid amount (in numbers):")
+        update.message.reply_text("⚠️ Please enter a valid amount in numbers only.")
         return ASK_AMOUNT
 
 # === Display QR and Start Verifying ===
 def show_qr_and_verify(update: Update, context: CallbackContext):
-    context.user_data["name"] = update.message.text.strip()
-    amount = context.user_data["amount"]
-    name = context.user_data["name"]
+    name = update.message.text.strip()
+    amount = context.user_data.get("amount")
+    context.user_data["name"] = name
 
-    qr_path = "qrphoto.jpg"  # Should exist in Railway project folder
+    delete_previous_messages(context)
+
+    qr_path = "qrphoto.jpg"
     upi_id = "9351044618@mbk"
 
-    update.message.reply_photo(open(qr_path, 'rb'), caption=f"\u2B06\uFE0F *Scan to Pay*\n\nSend *₹{amount}* to UPI ID: `{upi_id}`\nPayment will verify instantly!", parse_mode='Markdown')
+    msg = update.message.reply_photo(
+        open(qr_path, 'rb'),
+        caption=f"📲 *Scan to Pay*\n\n💸 Send *₹{amount}* to: `{upi_id}`\n\n_Payment will verify instantly!_",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    context.user_data["last_msg"] = msg.message_id
 
-    # Start 5-min monitor thread
+    checking_msg = context.bot.send_message(chat_id=update.effective_chat.id, text="🔍 *Checking for your payment...*", parse_mode=ParseMode.MARKDOWN)
+    context.user_data["checking_msg"] = checking_msg.message_id
+
     threading.Thread(target=monitor_payment_and_reply, args=(update, context, name, amount), daemon=True).start()
 
     return VERIFYING
@@ -59,21 +71,49 @@ def show_qr_and_verify(update: Update, context: CallbackContext):
 # === Monitor Firebase for 5 min ===
 def monitor_payment_and_reply(update, context, name, amount):
     user_id = update.message.chat_id
-    matched = False
-    for _ in range(30):  # Check every 10s for 5 mins
+    found = False
+
+    for _ in range(30):
         time.sleep(10)
         payments = db.child("verified_payments").get().val()
         if payments:
-            for record in payments.values():
-                if (record["name"].lower() == name.lower()
-                    and abs(record["amount"] - amount) < 0.01):
-                    context.bot.send_message(chat_id=user_id, text=f"\u2705 *Payment of ₹{amount} received successfully!*", parse_mode='Markdown')
+            for key, record in payments.items():
+                if record.get("verified", False):
+                    continue  # Already used
+
+                record_name = record.get("name", "").lower().split()[0]  # First name only
+                if (record_name == name.lower().split()[0] and
+                    abs(record.get("amount", 0) - amount) < 0.01):
+
+                    now = datetime.datetime.now()
+                    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+
+                    # Mark payment as used
+                    db.child("verified_payments").child(key).update({"verified": True})
+
+                    # Delete checking message
+                    try:
+                        context.bot.delete_message(chat_id=user_id, message_id=context.user_data.get("checking_msg"))
+                    except:
+                        pass
+
+                    # Send confirmation invoice
+                    context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"\u2705 *Payment Verified Successfully!*\n\n📄 *Invoice Details:*\n*Name:* `{record.get('name')}`\n*Amount:* ₹{record.get('amount')}\n🕒 *Verified At:* {timestamp}\n\n✅ _Thank you for your payment via PayVery!_",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    found = True
                     return
 
-    # If not matched after 5 min, show retry button
-    button = [[InlineKeyboardButton("Verify Again", callback_data=f"verify|{name}|{amount}")]]
-    reply_markup = InlineKeyboardMarkup(button)
-    context.bot.send_message(chat_id=user_id, text="⏱️ Payment not verified within 5 minutes.", reply_markup=reply_markup)
+    if not found:
+        try:
+            context.bot.delete_message(chat_id=user_id, message_id=context.user_data.get("checking_msg"))
+        except:
+            pass
+        button = [[InlineKeyboardButton("🔁 Verify Again", callback_data=f"verify|{name}|{amount}")]]
+        reply_markup = InlineKeyboardMarkup(button)
+        context.bot.send_message(chat_id=user_id, text="⏳ *Payment not found within 5 minutes.*", parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
 
 # === Handle Retry Button ===
 def verify_again(update: Update, context: CallbackContext):
@@ -82,18 +122,41 @@ def verify_again(update: Update, context: CallbackContext):
     _, name, amount = query.data.split("|")
     amount = float(amount)
     payments = db.child("verified_payments").get().val()
+
     if payments:
-        for record in payments.values():
-            if (record["name"].lower() == name.lower()
-                and abs(record["amount"] - amount) < 0.01):
-                query.edit_message_text(f"\u2705 *Payment of ₹{amount} received successfully!*", parse_mode='Markdown')
+        for key, record in payments.items():
+            if record.get("verified", False):
+                continue
+
+            record_name = record.get("name", "").lower().split()[0]
+            if (record_name == name.lower().split()[0] and
+                abs(record.get("amount", 0) - amount) < 0.01):
+
+                now = datetime.datetime.now()
+                timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+                db.child("verified_payments").child(key).update({"verified": True})
+
+                query.edit_message_text(
+                    f"\u2705 *Payment Verified Successfully!*\n\n📄 *Invoice Details:*\n*Name:* `{record.get('name')}`\n*Amount:* ₹{record.get('amount')}\n🕒 *Verified At:* {timestamp}\n\n✅ _Thank you for your payment via PayVery!_",
+                    parse_mode=ParseMode.MARKDOWN
+                )
                 return
-    query.edit_message_text("❌ Still no payment found. Please try again later or contact support.")
+
+    query.edit_message_text("❌ *Still no matching payment found.* Please ensure the name and amount are correct.", parse_mode=ParseMode.MARKDOWN)
 
 # === Cancel Command ===
 def cancel(update: Update, context: CallbackContext):
-    update.message.reply_text("Cancelled.")
+    context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Cancelled.")
     return ConversationHandler.END
+
+# === Utility to delete old messages ===
+def delete_previous_messages(context):
+    try:
+        user_id = context._chat_id_and_data[0]
+        if "last_msg" in context.user_data:
+            context.bot.delete_message(chat_id=user_id, message_id=context.user_data["last_msg"])
+    except:
+        pass
 
 # === Main ===
 def main():
@@ -105,7 +168,7 @@ def main():
         states={
             ASK_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, ask_name)],
             ASK_NAME: [MessageHandler(Filters.text & ~Filters.command, show_qr_and_verify)],
-            VERIFYING: []  # No user input handled during this
+            VERIFYING: []
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
