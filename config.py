@@ -24,4 +24,13 @@ HELP_MESSAGE = (
     "  - The bot matches your first name and allows for minor typos.\n\n"
     "7. *Need more help?*\n"
     "  - Contact support or type /start to begin again."
-) 
+)
+
+# Admin and Logging
+ADMIN_CHAT_ID = "1981828128"
+ADMIN_BOT_ONLINE_MESSAGE = "✅ *PayPilotsBot is LIVE!*\nStart Time: {start_time}"
+ADMIN_BOT_OFFLINE_MESSAGE = "❌ *PayPilotsBot is DOWN!*\nTotal Uptime: {uptime}\nLast seen: {last_seen}"
+ADMIN_ERROR_MESSAGE = "🚨 *An error occurred!*\n\n*User:* {user}\n*Error:* ```{error}```"
+ADMIN_STATUS_MESSAGE = "⚙️ *Bot Status*\n\n*Uptime:* {uptime}\n*Running since:* {start_time}"
+ADMIN_LIVE_UPTIME_MESSAGE = "🟢 *PayPilotsBot is LIVE*\n\n⏰ *Uptime:* {uptime}\n🕐 *Current Time:* {current_time}"
+LIVE_UPTIME_UPDATE_INTERVAL = 300  # Send live update every 5 minutes (300 seconds) 
