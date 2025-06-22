@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMe
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler, ConversationHandler
 
 # === CONFIG ===
-TELEGRAM_TOKEN = "7645994825:AAFd7MSE8RKI4a8USEaCdnQvkkxuYIMil2U"
+TELEGRAM_TOKEN = "8139748151:AAEOVSiq9tDt8DANm1Gji0nFt19FHqugAfQ"
 FIREBASE_CONFIG = {
     "apiKey": "fake",
     "authDomain": "payvari.firebaseapp.com",
@@ -28,6 +28,7 @@ user_messages = {}
 user_verified = {}
 user_last_attempt = {}
 user_qr_sent = {}  # Track users who received QR code
+user_request_time = {}  # Track when QR was sent to user
 
 # === MESSAGE CLEANUP ===
 def cleanup_all_messages(user_id, context):
@@ -100,55 +101,42 @@ def monitor_sms():
 
 # === AUTO CLEANUP UNCLAIMED PAYMENTS ===
 def auto_cleanup_unclaimed_payments():
-    """Automatically verify and delete unclaimed payments after 12 hours"""
+    """Delete all payment_requests and verified_payments older than 1 hour."""
     while True:
         try:
-            verified = db.child("verified_payments").get().val()
-            if verified:
-                current_time = datetime.datetime.now()
-                for key, data in verified.items():
-                    # Check if payment has timestamp, if not add one
+            now = datetime.datetime.now(datetime.timezone.utc)
+            # Clean up payment_requests
+            payment_reqs = db.child("payment_requests").get().val()
+            if payment_reqs:
+                for user_id, data in payment_reqs.items():
                     if "timestamp" not in data:
-                        data["timestamp"] = str(current_time)
-                        db.child("verified_payments").child(key).update({"timestamp": str(current_time)})
                         continue
-                    
-                    # Parse the timestamp
                     try:
                         payment_time = datetime.datetime.fromisoformat(data["timestamp"].replace('Z', '+00:00'))
-                        # If timestamp is naive, assume local time
                         if payment_time.tzinfo is None:
                             payment_time = payment_time.replace(tzinfo=datetime.timezone.utc)
-                        
-                        # Calculate time difference
-                        time_diff = current_time.replace(tzinfo=datetime.timezone.utc) - payment_time
-                        
-                        # If more than 12 hours have passed, auto-verify and delete
-                        if time_diff.total_seconds() > 12 * 3600:  # 12 hours in seconds
-                            print(f"[AUTO CLEANUP] Auto-verifying unclaimed payment: {data['name']} - ₹{data['amount']}")
-                            
-                            # Add to auto-verified payments for record keeping
-                            db.child("auto_verified_payments").push({
-                                "name": data["name"],
-                                "amount": data["amount"],
-                                "original_timestamp": data["timestamp"],
-                                "auto_verified_at": str(current_time),
-                                "status": "auto_verified_after_12h"
-                            })
-                            
-                            # Delete from verified_payments
+                        if (now - payment_time).total_seconds() > 3600:
+                            db.child("payment_requests").child(str(user_id)).remove()
+                    except Exception:
+                        db.child("payment_requests").child(str(user_id)).remove()
+            # Clean up verified_payments
+            verified = db.child("verified_payments").get().val()
+            if verified:
+                for key, data in verified.items():
+                    # Use 'timestamp' if available, otherwise skip
+                    if "timestamp" not in data:
+                        continue
+                    try:
+                        payment_time = datetime.datetime.fromisoformat(data["timestamp"].replace('Z', '+00:00'))
+                        if payment_time.tzinfo is None:
+                            payment_time = payment_time.replace(tzinfo=datetime.timezone.utc)
+                        if (now - payment_time).total_seconds() > 3600:
                             db.child("verified_payments").child(key).remove()
-                            
-                    except Exception as e:
-                        print(f"[AUTO CLEANUP] Error processing payment {key}: {e}")
-                        # If there's an error parsing timestamp, delete the payment anyway
+                    except Exception:
                         db.child("verified_payments").child(key).remove()
-                        
         except Exception as e:
             print(f"[auto_cleanup_unclaimed_payments error] {e}")
-        
-        # Check every hour
-        time.sleep(3600)
+        time.sleep(600)
 
 # === INVOICE GENERATOR ===
 def generate_invoice(user):
@@ -158,15 +146,15 @@ def generate_invoice(user):
     formatted_time = date_time.strftime("%I:%M %p")
     
     return (
-        f"🎉 **PAYMENT SUCCESSFUL**\n\n"
-        f"**📋 INVOICE**\n"
-        f"👤 **Name:** `{user['name']}`\n"
-        f"💰 **Amount:** `₹{user['amount']:.2f}`\n"
-        f"📅 **Date:** {formatted_date}\n"
-        f"🕐 **Time:** {formatted_time}\n"
-        f"🆔 **ID:** `{invoice_id}`\n\n"
-        f"✅ *Payment Verified Successfully*\n"
-        f"💡 *Keep this invoice for your records*"
+        f"🎉 *PAYMENT SUCCESSFUL*\n\n"
+        f"📋 *PAYMENT INVOICE*\n"
+        f"👤 *Name:* `{user['name']}`\n"
+        f"💰 *Amount:* `₹{user['amount']:.2f}`\n"
+        f"📅 *Date:* {formatted_date}\n"
+        f"🕐 *Time:* {formatted_time}\n"
+        f"🆔 *ID:* `{invoice_id}`\n\n"
+        f"✅ *Payment Was Verified By @paypilotsbot*\n"
+        f"💡 **Keep this invoice for records**"
     )
 
 # === USER FLOW ===
@@ -184,9 +172,9 @@ def start(update: Update, context: CallbackContext):
     store_message_id(user_id, update.message)
     
     msg = update.message.reply_text(
-        "🚀 **Welcome to PayVery!**\n\n"
-        "💫 *Quick 2-Step Payment Checkout *\n"
-       
+        "🚀 *Welcome to PayPilots!*\n"
+        "**This is a Private Telegram bot that securely confirms payments in realtime, insuring fast transactions for the clients of @curiositymind**\n\n"
+       "*💡Lets Start! ✅*\n"
         "👤 Please enter your **full name**:",
         parse_mode="Markdown"
     )
@@ -203,8 +191,8 @@ def ask_name(update: Update, context: CallbackContext):
     
     msg = update.message.reply_text(
         f"👋 **Hello {user_inputs[user_id]['name']}!**\n\n"
-        "💰 Enter the **amount** to pay (₹):\n"
-        "💡 *Example: 1 or 250.50*",
+        "💰 *Enter the **amount** to pay (₹)*:\n"
+        "💡 **Ex: 1 or 250.50**",
         parse_mode="Markdown"
     )
     store_message_id(user_id, msg)
@@ -225,7 +213,7 @@ def ask_amount(update: Update, context: CallbackContext):
         msg = update.message.reply_text(
             "❌ **Invalid Amount!**\n\n"
             "Enter a valid number:\n"
-            "✅ *Example: 1 or 250.50*",
+            "✅ **Ex: 1 or 250.50**",
             parse_mode="Markdown"
         )
         store_message_id(user_id, msg)
@@ -235,11 +223,11 @@ def ask_amount(update: Update, context: CallbackContext):
         chat_id=user_id,
         photo=open(QR_IMAGE_PATH, 'rb'),
         caption=(
-            f"📱 **SCAN QR TO PAY**\n\n"
-            f"👤 **Name:** {user_inputs[user_id]['name']}\n"
-            f"💰 **Amount:** ₹{amount:.2f}\n"
-            f"🏦 **UPI:** `{UPI_ID}`\n\n"
-            f"🔍 *Monitoring your payment...*\n"
+            f"📱 *SCAN THE QR TO PAY*\n\n"
+            f"👤 *Name:* {user_inputs[user_id]['name']}\n"
+            f"💰 *Amount:* ₹{amount:.2f}\n"
+            f"🏦 *TO UPI:* `{UPI_ID}`\n\n"
+            f"🔍 _ Your payment is monitoring live for 5 minutes..._\n"
            
         ),
         parse_mode="Markdown"
@@ -248,6 +236,14 @@ def ask_amount(update: Update, context: CallbackContext):
     
     # Mark that QR code has been sent to this user
     user_qr_sent[user_id] = True
+    user_request_time[user_id] = time.time()  # Track request time (now)
+
+    # Store payment request in Firebase
+    db.child("payment_requests").child(str(user_id)).set({
+        "name": user_inputs[user_id]["name"],
+        "amount": amount,
+        "timestamp": str(datetime.datetime.now())
+    })
 
     context.job_queue.run_repeating(realtime_verify, interval=5, first=5, context=user_id, name=str(user_id))
     context.job_queue.run_once(stop_verification, 300, context=user_id, name=str(user_id) + "_timeout")
@@ -255,6 +251,28 @@ def ask_amount(update: Update, context: CallbackContext):
 
 def realtime_verify(context: CallbackContext):
     user_id = context.job.context
+    req_time = user_request_time.get(user_id)
+    # Check Firebase for payment request timestamp
+    payment_req = db.child("payment_requests").child(str(user_id)).get().val()
+    if payment_req and "timestamp" in payment_req:
+        try:
+            payment_time = datetime.datetime.fromisoformat(payment_req["timestamp"].replace('Z', '+00:00'))
+            if payment_time.tzinfo is None:
+                payment_time = payment_time.replace(tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            # Only allow auto-verification for 5 minutes
+            if (now - payment_time).total_seconds() > 300:
+                context.job.schedule_removal()
+                return
+        except Exception as e:
+            context.job.schedule_removal()
+            return
+    else:
+        context.job.schedule_removal()
+        return
+    if req_time is None or (time.time() - req_time) > 3600:
+        context.job.schedule_removal()
+        return
     if user_verified.get(user_id):
         context.job.schedule_removal()
         return
@@ -306,6 +324,10 @@ def realtime_verify(context: CallbackContext):
                     del user_verified[user_id]
                 if user_id in user_qr_sent:
                     del user_qr_sent[user_id]
+                if user_id in user_request_time:
+                    del user_request_time[user_id]
+                # Delete payment request from Firebase
+                db.child("payment_requests").child(str(user_id)).remove()
                 return
 
 def stop_verification(context: CallbackContext):
@@ -314,7 +336,26 @@ def stop_verification(context: CallbackContext):
     # Additional safety check: if user data was cleaned up, don't send timeout
     if user_id not in user_inputs:
         return
-        
+    
+    # If request is older than 1 hour, do not send timeout or auto-verify, just clean up
+    req_time = user_request_time.get(user_id)
+    if req_time is None or (time.time() - req_time) > 3600:
+        if user_id in user_inputs:
+            del user_inputs[user_id]
+        if user_id in user_verified:
+            del user_verified[user_id]
+        if user_id in user_qr_sent:
+            del user_qr_sent[user_id]
+        if user_id in user_request_time:
+            del user_request_time[user_id]
+        # Delete payment request from Firebase
+        db.child("payment_requests").child(str(user_id)).remove()
+        # Remove realtime_verify job for this user
+        jobs = context.job_queue.get_jobs_by_name(str(user_id))
+        for job in jobs:
+            job.schedule_removal()
+        return
+    
     # Only send timeout message if user received QR code and payment wasn't verified
     if not user_verified.get(user_id) and user_qr_sent.get(user_id):
         cleanup_all_messages(user_id, context)
@@ -325,19 +366,24 @@ def stop_verification(context: CallbackContext):
             "user_id": user_id,
             "timestamp": str(datetime.datetime.now())
         })
-        keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data="verify_again")]]
+        keyboard = [[InlineKeyboardButton("🔄 Retry ", callback_data="verify_again")]]
         context.bot.send_message(
             chat_id=user_id,
             text="⏰ **Payment Session Timeout Reached**\n\n"
                  "❌ * Type /start To Pay Again*\n\n"
-                 "🔄 *Click to check again*",
+                 "🔄 *Click Retry tocheck again*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+        # Remove realtime_verify job for this user
+        jobs = context.job_queue.get_jobs_by_name(str(user_id))
+        for job in jobs:
+            job.schedule_removal()
+        return
 
 def send_restart_button(context: CallbackContext):
     user_id = context.job.context
-    keyboard = [[InlineKeyboardButton("🔁 Verify ", callback_data="pay_again")]]
+    keyboard = [[InlineKeyboardButton("🔁 Verify New Payment", callback_data="pay_again")]]
     context.bot.send_message(
         chat_id=user_id,
         text="💡 **Want to Verify another payment?**\n\n🚀 *Click to start*",
@@ -352,6 +398,63 @@ def button_handler(update: Update, context: CallbackContext):
 
     if query.data == "verify_again":
         cleanup_all_messages(user_id, context)
+        
+        # Check if the request is older than 1 hour (from Firebase)
+        payment_req = db.child("payment_requests").child(str(user_id)).get().val()
+        if not payment_req or "timestamp" not in payment_req:
+            context.bot.send_message(
+                chat_id=user_id,
+                text="⏰ **This payment session has expired.**\n\nPlease start a new payment request with /start.",
+                parse_mode="Markdown"
+            )
+            # Clean up user data for this user
+            if user_id in user_inputs:
+                del user_inputs[user_id]
+            if user_id in user_verified:
+                del user_verified[user_id]
+            if user_id in user_qr_sent:
+                del user_qr_sent[user_id]
+            if user_id in user_request_time:
+                del user_request_time[user_id]
+            db.child("payment_requests").child(str(user_id)).remove()
+            return
+        try:
+            payment_time = datetime.datetime.fromisoformat(payment_req["timestamp"].replace('Z', '+00:00'))
+            if payment_time.tzinfo is None:
+                payment_time = payment_time.replace(tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if (now - payment_time).total_seconds() > 3600:
+                context.bot.send_message(
+                    chat_id=user_id,
+                    text="⏰ **This payment session has expired.**\n\nPlease start a new payment request with /start.",
+                    parse_mode="Markdown"
+                )
+                if user_id in user_inputs:
+                    del user_inputs[user_id]
+                if user_id in user_verified:
+                    del user_verified[user_id]
+                if user_id in user_qr_sent:
+                    del user_qr_sent[user_id]
+                if user_id in user_request_time:
+                    del user_request_time[user_id]
+                db.child("payment_requests").child(str(user_id)).remove()
+                return
+        except Exception as e:
+            context.bot.send_message(
+                chat_id=user_id,
+                text="⏰ **This payment session has expired.**\n\nPlease start a new payment request with /start.",
+                parse_mode="Markdown"
+            )
+            if user_id in user_inputs:
+                del user_inputs[user_id]
+            if user_id in user_verified:
+                del user_verified[user_id]
+            if user_id in user_qr_sent:
+                del user_qr_sent[user_id]
+            if user_id in user_request_time:
+                del user_request_time[user_id]
+            db.child("payment_requests").child(str(user_id)).remove()
+            return
         
         checking_msg = context.bot.send_message(
             chat_id=user_id,
@@ -414,6 +517,11 @@ def button_handler(update: Update, context: CallbackContext):
             del user_verified[user_id]
         if user_id in user_qr_sent:
             del user_qr_sent[user_id]
+        if user_id in user_request_time:
+            del user_request_time[user_id]
+        
+        # Delete old payment request from Firebase
+        db.child("payment_requests").child(str(user_id)).remove()
         
         context.bot.send_message(
             chat_id=user_id, 
