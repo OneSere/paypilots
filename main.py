@@ -328,8 +328,8 @@ def stop_verification(context: CallbackContext):
         keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data="verify_again")]]
         context.bot.send_message(
             chat_id=user_id,
-            text="⏰ **Payment Timeout**\n\n"
-                 "❌ *Payment not detected in 5 minutes*\n\n"
+            text="⏰ **Payment Session Timeout Reached**\n\n"
+                 "❌ * Payment was not completed or detected *\n\n"
                  "🔄 *Click to check again*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -340,7 +340,7 @@ def send_restart_button(context: CallbackContext):
     keyboard = [[InlineKeyboardButton("🔁 Verify Another", callback_data="pay_again")]]
     context.bot.send_message(
         chat_id=user_id,
-        text="💡 **Verify another payment?**\n\n🚀 *Click to start new verification*",
+        text="💡 **Verify another payment?**\n\n
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -398,9 +398,9 @@ def button_handler(update: Update, context: CallbackContext):
         if not payment_found:
             context.bot.send_message(
                 chat_id=user_id,
-                text="❌ **Payment Not Found**\n\n"
+                text="❌ **Payment Still Not Found**\n\n"
                      "💡 *Make sure you have completed the payment*\n"
-                     "🔄 *Try again or contact support*",
+                     "🔄 *Click /start to pay again*",
                 parse_mode="Markdown"
             )
 
