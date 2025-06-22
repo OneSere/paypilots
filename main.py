@@ -1,121 +1,372 @@
 import re
 import json
+import time
 import datetime
 import threading
+import uuid
 import pyrebase
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler, ConversationHandler
 
-# === Firebase Configuration ===
-firebase_config = {
-    "apiKey": "FAKE-KEY",  # Optional
+# === CONFIG ===
+TELEGRAM_TOKEN = "7645994825:AAEiDuTmIBcuc_tgbl0kKw1Auun4LXcs4NQ"
+FIREBASE_CONFIG = {
+    "apiKey": "fake",
     "authDomain": "payvari.firebaseapp.com",
     "databaseURL": "https://payvari-default-rtdb.firebaseio.com/",
     "storageBucket": "payvari.appspot.com"
 }
+QR_IMAGE_PATH = "qrphoto.jpg"
+UPI_ID = "9351044618@mbk"
 
-firebase = pyrebase.initialize_app(firebase_config)
+firebase = pyrebase.initialize_app(FIREBASE_CONFIG)
 db = firebase.database()
 
-# === Hardcoded Telegram Token ===
-TELEGRAM_TOKEN = "7651343412:AAHmHZWDhgDMGLcqtGKBi-r8M7pVvzJ_baY"
+ASK_NAME, ASK_AMOUNT = range(2)
+user_inputs = {}
+user_messages = {}
+user_verified = {}
+user_last_attempt = {}
+user_qr_sent = {}  # Track users who received QR code
 
-# === Conversation States ===
-ASK_NAME, ASK_AMOUNT, ASK_DATE = range(3)
+# === MESSAGE CLEANUP ===
+def cleanup_all_messages(user_id, context):
+    if user_id in user_messages:
+        for msg_id in user_messages[user_id]:
+            try:
+                context.bot.delete_message(chat_id=user_id, message_id=msg_id)
+                time.sleep(0.1)
+            except Exception as e:
+                pass
+        user_messages[user_id] = []
 
-# === Extract payment details from SMS ===
-def parse_sms(message):
-    match = re.search(r"received\s+Rs\.?\s*([\d.]+).*?from\s+(.+?)\.", message, re.IGNORECASE)
+def store_message_id(user_id, message):
+    if user_id not in user_messages:
+        user_messages[user_id] = []
+    if hasattr(message, 'message_id'):
+        user_messages[user_id].append(message.message_id)
+
+# === PAYMENT PARSER ===
+def parse_payment_sms(sms):
+    match = re.search(r"received\s+Rs\.?\s*([\d.]+).*?from\s+(.+?)\.", sms, re.IGNORECASE)
     if match:
         amount = float(match.group(1))
         name = match.group(2).strip()
-        date = datetime.datetime.now().strftime('%Y-%m-%d')
+        date = datetime.datetime.now().strftime("%Y-%m-%d")
         return {"name": name, "amount": amount, "date": date}
     return None
 
-# === Monitor and move SMS to verified_payments ===
+# === MONITOR SMS ===
 def monitor_sms():
     while True:
         try:
-            all_sms = db.child("sms_messages").get().val()
-            if all_sms:
-                for key, value in all_sms.items():
+            sms_data = db.child("raw_sms").get().val()
+            if sms_data:
+                for key, value in sms_data.items():
                     msg = value.get("message", "")
-                    parsed = parse_sms(msg)
+                    parsed = parse_payment_sms(msg)
                     if parsed:
                         db.child("verified_payments").push(parsed)
-                    db.child("sms_messages").child(key).remove()
+                    db.child("raw_sms").child(key).remove()
         except Exception as e:
-            print(f"[monitor_sms] Error: {e}")
-        import time
-        time.sleep(10)
+            print(f"[monitor_sms error] {e}")
+        time.sleep(3)
 
-# === Telegram Bot Handlers ===
+# === INVOICE GENERATOR ===
+def generate_invoice(user):
+    invoice_id = uuid.uuid4().hex[:8].upper()
+    date_time = datetime.datetime.now()
+    formatted_date = date_time.strftime("%d %B %Y")
+    formatted_time = date_time.strftime("%I:%M %p")
+    
+    return (
+        f"🎉 **PAYMENT SUCCESSFUL**\n\n"
+        f"**📋 INVOICE**\n"
+        f"👤 **Name:** `{user['name']}`\n"
+        f"💰 **Amount:** `₹{user['amount']:.2f}`\n"
+        f"📅 **Date:** {formatted_date}\n"
+        f"🕐 **Time:** {formatted_time}\n"
+        f"🆔 **ID:** `{invoice_id}`\n\n"
+        f"✅ *Payment Verified Successfully*\n"
+        f"💡 *Keep this invoice for your records*"
+    )
+
+# === USER FLOW ===
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("Welcome to Payment Verification Bot.\nEnter payer name:")
+    user_id = update.message.from_user.id
+    now = time.time()
+    if now - user_last_attempt.get(user_id, 0) < 5:
+        update.message.reply_text("⏳ Please wait before starting again.")
+        return ConversationHandler.END
+    
+    user_last_attempt[user_id] = now
+    user_messages[user_id] = []
+    user_verified[user_id] = False
+    
+    store_message_id(user_id, update.message)
+    
+    msg = update.message.reply_text(
+        "🚀 **Welcome to PayVery!**\n\n"
+        "💫 *Quick 2-Step Payment Checkout *\n"
+       
+        "👤 Please enter your **full name**:",
+        parse_mode="Markdown"
+    )
+    store_message_id(user_id, msg)
     return ASK_NAME
 
 def ask_name(update: Update, context: CallbackContext):
-    context.user_data["name"] = update.message.text.strip()
-    update.message.reply_text("Enter amount paid:")
+    user_id = update.message.from_user.id
+    
+    store_message_id(user_id, update.message)
+    cleanup_all_messages(user_id, context)
+    
+    user_inputs[user_id] = {"name": update.message.text.strip()}
+    
+    msg = update.message.reply_text(
+        f"👋 **Hello {user_inputs[user_id]['name']}!**\n\n"
+        "💰 Enter the **amount** to pay (₹):\n"
+        "💡 *Example: 1 or 250.50*",
+        parse_mode="Markdown"
+    )
+    store_message_id(user_id, msg)
     return ASK_AMOUNT
 
 def ask_amount(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    
+    store_message_id(user_id, update.message)
+    cleanup_all_messages(user_id, context)
+    
     try:
-        context.user_data["amount"] = float(update.message.text.strip())
-        update.message.reply_text("Enter payment date (YYYY-MM-DD):")
-        return ASK_DATE
-    except ValueError:
-        update.message.reply_text("Invalid amount. Try again:")
+        amount = float(update.message.text.strip())
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+        user_inputs[user_id]["amount"] = amount
+    except:
+        msg = update.message.reply_text(
+            "❌ **Invalid Amount!**\n\n"
+            "Enter a valid number:\n"
+            "✅ *Example: 1 or 250.50*",
+            parse_mode="Markdown"
+        )
+        store_message_id(user_id, msg)
         return ASK_AMOUNT
 
-def ask_date(update: Update, context: CallbackContext):
-    context.user_data["date"] = update.message.text.strip()
-    name = context.user_data["name"]
-    amount = context.user_data["amount"]
-    date = context.user_data["date"]
+    msg = context.bot.send_photo(
+        chat_id=user_id,
+        photo=open(QR_IMAGE_PATH, 'rb'),
+        caption=(
+            f"📱 **SCAN QR TO PAY**\n\n"
+            f"👤 **Name:** {user_inputs[user_id]['name']}\n"
+            f"💰 **Amount:** ₹{amount:.2f}\n"
+            f"🏦 **UPI:** `{UPI_ID}`\n\n"
+            f"🔍 *Monitoring your payment...*\n"
+           
+        ),
+        parse_mode="Markdown"
+    )
+    store_message_id(user_id, msg)
+    
+    # Mark that QR code has been sent to this user
+    user_qr_sent[user_id] = True
 
-    try:
-        payments = db.child("verified_payments").get().val()
-        if payments:
-            for p in payments.values():
-                if (p["name"].lower() == name.lower()
-                        and abs(p["amount"] - amount) < 0.01
-                        and p["date"] == date):
-                    update.message.reply_text("✅ Payment Verified!")
-                    return ConversationHandler.END
-    except:
-        pass
-
-    update.message.reply_text("❌ Payment not found.")
+    context.job_queue.run_repeating(realtime_verify, interval=5, first=5, context=user_id, name=str(user_id))
+    context.job_queue.run_once(stop_verification, 300, context=user_id, name=str(user_id) + "_timeout")
     return ConversationHandler.END
 
-def cancel(update: Update, context: CallbackContext):
-    update.message.reply_text("Verification canceled.")
-    return ConversationHandler.END
+def realtime_verify(context: CallbackContext):
+    user_id = context.job.context
+    if user_verified.get(user_id):
+        context.job.schedule_removal()
+        return
+    
+    user = user_inputs.get(user_id, {})
+    name = user.get("name", "")
+    amount = user.get("amount", 0)
+    verified = db.child("verified_payments").get().val()
+    
+    if verified:
+        for key, data in verified.items():
+            if data["name"].lower() == name.lower() and abs(data["amount"] - amount) < 0.01:
+                user_verified[user_id] = True
+                
+                cleanup_all_messages(user_id, context)
+                
+                success_msg = context.bot.send_message(
+                    chat_id=user_id, 
+                    text="🎉 **Payment Recieved!**\n\n⚡ *Processing...*",
+                    parse_mode="Markdown"
+                )
+                
+                time.sleep(2)
+                
+                try:
+                    context.bot.delete_message(chat_id=user_id, message_id=success_msg.message_id)
+                except:
+                    pass
+                
+                context.bot.send_message(chat_id=user_id, text=generate_invoice(user), parse_mode="Markdown")
+                
+                db.child("verified_payments").child(key).remove()
+                
+                # Cancel both the verification job and timeout job
+                context.job.schedule_removal()
+                
+                # Cancel the timeout job by removing it from job queue
+                try:
+                    context.job_queue.get_jobs_by_name(str(user_id) + "_timeout")[0].schedule_removal()
+                except:
+                    pass
+                
+                context.job_queue.run_once(send_restart_button, 30, context=user_id)
+                
+                # Clean up user data after successful verification
+                if user_id in user_inputs:
+                    del user_inputs[user_id]
+                if user_id in user_verified:
+                    del user_verified[user_id]
+                if user_id in user_qr_sent:
+                    del user_qr_sent[user_id]
+                return
 
-# === Main Execution ===
+def stop_verification(context: CallbackContext):
+    user_id = context.job.context
+    
+    # Additional safety check: if user data was cleaned up, don't send timeout
+    if user_id not in user_inputs:
+        return
+        
+    # Only send timeout message if user received QR code and payment wasn't verified
+    if not user_verified.get(user_id) and user_qr_sent.get(user_id):
+        cleanup_all_messages(user_id, context)
+        
+        db.child("failed_attempts").push({
+            "name": user_inputs[user_id].get("name", ""),
+            "amount": user_inputs[user_id].get("amount", 0),
+            "user_id": user_id,
+            "timestamp": str(datetime.datetime.now())
+        })
+        keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data="verify_again")]]
+        context.bot.send_message(
+            chat_id=user_id,
+            text="⏰ **Payment Timeout**\n\n"
+                 "❌ *Payment not detected in 5 minutes*\n\n"
+                 "🔄 *Click to check again*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+def send_restart_button(context: CallbackContext):
+    user_id = context.job.context
+    keyboard = [[InlineKeyboardButton("🔁 Verify Another", callback_data="pay_again")]]
+    context.bot.send_message(
+        chat_id=user_id,
+        text="💡 **Verify another payment?**\n\n🚀 *Click to start new verification*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def button_handler(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = query.from_user.id
+    query.answer()
+
+    if query.data == "verify_again":
+        cleanup_all_messages(user_id, context)
+        
+        checking_msg = context.bot.send_message(
+            chat_id=user_id,
+            text="🔍 **Re-checking payment...**\n\n⏳ *Please wait...*",
+            parse_mode="Markdown"
+        )
+        
+        # Reset verification status for re-checking
+        user_verified[user_id] = False
+        
+        time.sleep(2)
+        try:
+            context.bot.delete_message(chat_id=user_id, message_id=checking_msg.message_id)
+        except:
+            pass
+        
+        # Re-check payment immediately
+        user = user_inputs.get(user_id, {})
+        name = user.get("name", "")
+        amount = user.get("amount", 0)
+        verified = db.child("verified_payments").get().val()
+        
+        payment_found = False
+        if verified:
+            for key, data in verified.items():
+                if data["name"].lower() == name.lower() and abs(data["amount"] - amount) < 0.01:
+                    user_verified[user_id] = True
+                    payment_found = True
+                    
+                    context.bot.send_message(
+                        chat_id=user_id, 
+                        text="🎉 **Payment Recieved!**\n\n⚡ *Processing...*",
+                        parse_mode="Markdown"
+                    )
+                    
+                    time.sleep(2)
+                    
+                    context.bot.send_message(chat_id=user_id, text=generate_invoice(user), parse_mode="Markdown")
+                    
+                    db.child("verified_payments").child(key).remove()
+                    context.job_queue.run_once(send_restart_button, 30, context=user_id)
+                    break
+        
+        if not payment_found:
+            context.bot.send_message(
+                chat_id=user_id,
+                text="❌ **Payment Not Found**\n\n"
+                     "💡 *Make sure you have completed the payment*\n"
+                     "🔄 *Try again or contact support*",
+                parse_mode="Markdown"
+            )
+
+    elif query.data == "pay_again":
+        cleanup_all_messages(user_id, context)
+        
+        # Clean up user data for fresh start
+        if user_id in user_inputs:
+            del user_inputs[user_id]
+        if user_id in user_verified:
+            del user_verified[user_id]
+        if user_id in user_qr_sent:
+            del user_qr_sent[user_id]
+        
+        context.bot.send_message(
+            chat_id=user_id, 
+            text="🔄 **Starting New Verification**\n\n💫 *Type /start to begin*",
+            parse_mode="Markdown"
+        )
+
+def cleanup_messages(user_id, context):
+    cleanup_all_messages(user_id, context)
+
+# === MAIN ===
 def main():
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+    threading.Thread(target=monitor_sms, daemon=True).start()
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start), CommandHandler("rstart", start)],
         states={
             ASK_NAME: [MessageHandler(Filters.text & ~Filters.command, ask_name)],
             ASK_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, ask_amount)],
-            ASK_DATE: [MessageHandler(Filters.text & ~Filters.command, ask_date)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[]
     )
 
-    dp.add_handler(conv_handler)
-
-    # Start Firebase monitoring in background thread
-    threading.Thread(target=monitor_sms, daemon=True).start()
+    dp.add_handler(conv)
+    dp.add_handler(CallbackQueryHandler(button_handler))
 
     updater.start_polling()
-    print("🤖 Bot is running...")
+    print("🤖 PayVery Bot is running...")
     updater.idle()
 
 if __name__ == "__main__":
