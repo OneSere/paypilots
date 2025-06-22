@@ -223,14 +223,17 @@ def ask_amount(update: Update, context: CallbackContext):
         chat_id=user_id,
         photo=open(QR_IMAGE_PATH, 'rb'),
         caption=(
-            f"📱 *SCAN THE QR TO PAY*\n\n"
-            f"👤 *Name:* {user_inputs[user_id]['name']}\n"
-            f"💰 *Amount:* ₹{amount:.2f}\n"
-            f"🏦 *TO UPI:* `{UPI_ID}`\n\n"
-            f"🔍 _ Your payment is monitoring live for 5 minutes..._\n"
+            f"📱 **SCAN QR TO PAY**\n\n"
+            f"👤 **Name:** {user_inputs[user_id]['name']}\n"
+            f"💰 **Amount:** ₹{amount:.2f}\n"
+            f"🏦 **UPI:** `{UPI_ID}`\n\n"
+            f"🔍 *Monitoring your payment...*\n"
            
         ),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel Payment", callback_data="cancel_payment")]
+        ])
     )
     store_message_id(user_id, msg)
     
@@ -371,7 +374,7 @@ def stop_verification(context: CallbackContext):
             chat_id=user_id,
             text="⏰ **Payment Session Timeout Reached**\n\n"
                  "❌ * Type /start To Pay Again*\n\n"
-                 "🔄 *Click Retry tocheck again*",
+                 "🔄 *Click Retry to check again*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -528,6 +531,32 @@ def button_handler(update: Update, context: CallbackContext):
             text="🔄 **Starting New Verification**\n\n💫 *Type /start to begin*",
             parse_mode="Markdown"
         )
+
+    elif query.data == "cancel_payment":
+        # Clean up user data
+        if user_id in user_inputs:
+            del user_inputs[user_id]
+        if user_id in user_verified:
+            del user_verified[user_id]
+        if user_id in user_qr_sent:
+            del user_qr_sent[user_id]
+        if user_id in user_request_time:
+            del user_request_time[user_id]
+        # Delete payment request from Firebase
+        db.child("payment_requests").child(str(user_id)).remove()
+        # Remove all jobs for this user
+        jobs = context.job_queue.get_jobs_by_name(str(user_id))
+        for job in jobs:
+            job.schedule_removal()
+        jobs = context.job_queue.get_jobs_by_name(str(user_id) + "_timeout")
+        for job in jobs:
+            job.schedule_removal()
+        context.bot.send_message(
+            chat_id=user_id,
+            text="❌ *Payment Cancelled*\n\nTo *pay again*, type /start.",
+            parse_mode="Markdown"
+        )
+        return
 
 def cleanup_messages(user_id, context):
     cleanup_all_messages(user_id, context)
