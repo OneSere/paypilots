@@ -681,7 +681,8 @@ def send_live_uptime_update(context: CallbackContext):
     global LIVE_UPTIME_MESSAGE_ID
     try:
         uptime = get_uptime()
-        current_time = datetime.datetime.now().strftime("%I:%M:%S %p")
+        # Use Indian timezone (IST) with 24-hour format
+        current_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).strftime("%H:%M:%S")
         
         live_message = ADMIN_LIVE_UPTIME_MESSAGE.format(
             uptime=uptime,
@@ -779,7 +780,7 @@ def main():
     dp.add_error_handler(error_handler)
 
     # Start live uptime monitoring
-    context.job_queue.run_repeating(
+    updater.job_queue.run_repeating(
         send_live_uptime_update,
         interval=1,  # Update every second
         first=1,     # Start immediately
@@ -811,7 +812,7 @@ def main():
     finally:
         # Send shutdown message to admin
         uptime = get_uptime()
-        last_seen = datetime.datetime.now().strftime("%I:%M:%S %p")
+        last_seen = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).strftime("%H:%M:%S")
         try:
             updater.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
