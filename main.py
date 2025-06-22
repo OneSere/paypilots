@@ -7,7 +7,13 @@ import uuid
 import pyrebase
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler, ConversationHandler
-from config import PAYMENT_REQUEST_TIMEOUT_SECONDS, PAYMENT_AUTO_VERIFY_WINDOW_SECONDS, PAYMENT_RETRY_LIMIT, PAYMENT_RETRY_WINDOW_SECONDS, AMOUNT_TOLERANCE, QR_TIME_LEFT_MESSAGE, HELP_MESSAGE, COUNTDOWN_UPDATE_INTERVAL_SECONDS
+from config import (
+    PAYMENT_REQUEST_TIMEOUT_SECONDS, PAYMENT_AUTO_VERIFY_WINDOW_SECONDS, PAYMENT_RETRY_LIMIT,
+    PAYMENT_RETRY_WINDOW_SECONDS, AMOUNT_TOLERANCE, QR_TIME_LEFT_MESSAGE, HELP_MESSAGE,
+    COUNTDOWN_UPDATE_INTERVAL_SECONDS, ADMIN_CHAT_ID, ADMIN_BOT_ONLINE_MESSAGE,
+    ADMIN_BOT_OFFLINE_MESSAGE, ADMIN_ERROR_MESSAGE, ADMIN_STATUS_MESSAGE, 
+    ADMIN_LIVE_UPTIME_MESSAGE, LIVE_UPTIME_UPDATE_INTERVAL
+)
 import difflib
 
 # === CONFIG ===
@@ -32,6 +38,10 @@ user_last_attempt = {}
 user_qr_sent = {}  # Track users who received QR code
 user_request_time = {}  # Track when QR was sent to user
 user_rate_limit = {}  # user_id: [timestamps]
+
+# === ADMIN & LOGGING GLOBALS ===
+BOT_START_TIME = None
+LIVE_UPTIME_MESSAGE_ID = None  # Store the message ID of the live uptime message
 
 # === MESSAGE CLEANUP ===
 def cleanup_all_messages(user_id, context):
@@ -528,7 +538,7 @@ def button_handler(update: Update, context: CallbackContext):
                     
                     context.bot.send_message(
                         chat_id=user_id, 
-                        text="🎉 **Payment Recieved!**\n\n⚡ *Processing...*",
+                        text="🎉 *Payment Recieved!*\n\n⚡ *Processing...*",
                         parse_mode="Markdown"
                     )
                     
@@ -538,6 +548,18 @@ def button_handler(update: Update, context: CallbackContext):
                     
                     db.child("verified_payments").child(key).remove()
                     context.job_queue.run_once(send_restart_button, 30, context=user_id)
+                    
+                    # Clean up user data after successful verification
+                    if user_id in user_inputs:
+                        del user_inputs[user_id]
+                    if user_id in user_verified:
+                        del user_verified[user_id]
+                    if user_id in user_qr_sent:
+                        del user_qr_sent[user_id]
+                    if user_id in user_request_time:
+                        del user_request_time[user_id]
+                    # Delete payment request from Firebase
+                    db.child("payment_requests").child(str(user_id)).remove()
                     break
         
         if not payment_found:
@@ -545,7 +567,7 @@ def button_handler(update: Update, context: CallbackContext):
                 chat_id=user_id,
                 text="❌ **Payment Not Found Again**\n\n"
                      "💡 *Make sure you have completed the payment*\n"
-                     "🔄 *Click /start To Pay again*",
+                     "🔄 * Or Click /start To Pay again*",
                 parse_mode="Markdown"
             )
 
@@ -567,7 +589,7 @@ def button_handler(update: Update, context: CallbackContext):
         
         context.bot.send_message(
             chat_id=user_id, 
-            text="🔄 **Starting New Verification**\n\n💫 *Type /start to begin*",
+            text="🔄 *Starting New Verification*\n\n💫 *Type /start to begin*",
             parse_mode="Markdown"
         )
 
@@ -603,6 +625,97 @@ def cleanup_messages(user_id, context):
 def help_command(update: Update, context: CallbackContext):
     update.message.reply_text(HELP_MESSAGE, parse_mode="Markdown")
 
+# === ADMIN & LOGGING ===
+def send_admin_message(context: CallbackContext, message: str):
+    """Helper function to send a message to the admin."""
+    try:
+        context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=message,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Failed to send message to admin: {e}")
+
+def error_handler(update: object, context: CallbackContext) -> None:
+    """Log the error and send a message to the admin."""
+    print(f"Exception while handling an update: {context.error}")
+
+    user_info = "N/A (Scheduled job or internal error)"
+    if update and hasattr(update, 'effective_user') and update.effective_user:
+        user_info = f"ID: {update.effective_user.id}, Name: {update.effective_user.full_name}"
+
+    error_message = ADMIN_ERROR_MESSAGE.format(
+        user=user_info,
+        error=context.error
+    )
+    send_admin_message(context, error_message)
+
+def get_uptime():
+    """Calculates the bot's uptime in a human-readable format."""
+    if BOT_START_TIME is None:
+        return "N/A"
+    delta = datetime.datetime.now() - BOT_START_TIME
+    hours, remainder = divmod(delta.total_seconds(), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+
+def status_command(update: Update, context: CallbackContext):
+    """Shows the bot's status and uptime, admin-only."""
+    user_id = str(update.message.from_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        update.message.reply_text("⛔ Sorry, this is an admin-only command.")
+        return
+
+    uptime = get_uptime()
+    start_time_str = BOT_START_TIME.strftime("%Y-%m-%d %H:%M:%S") if BOT_START_TIME else "N/A"
+    
+    status_message = ADMIN_STATUS_MESSAGE.format(
+        uptime=uptime,
+        start_time=start_time_str
+    )
+    update.message.reply_text(status_message, parse_mode="Markdown")
+
+def send_live_uptime_update(context: CallbackContext):
+    """Send live uptime update to admin by editing a single message."""
+    global LIVE_UPTIME_MESSAGE_ID
+    try:
+        uptime = get_uptime()
+        current_time = datetime.datetime.now().strftime("%I:%M:%S %p")
+        
+        live_message = ADMIN_LIVE_UPTIME_MESSAGE.format(
+            uptime=uptime,
+            current_time=current_time
+        )
+        
+        # If we don't have a message ID yet, send the first message
+        if LIVE_UPTIME_MESSAGE_ID is None:
+            msg = context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=live_message,
+                parse_mode="Markdown"
+            )
+            LIVE_UPTIME_MESSAGE_ID = msg.message_id
+        else:
+            # Edit the existing message
+            try:
+                context.bot.edit_message_text(
+                    chat_id=ADMIN_CHAT_ID,
+                    message_id=LIVE_UPTIME_MESSAGE_ID,
+                    text=live_message,
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                # If editing fails (message too old), send a new one
+                msg = context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=live_message,
+                    parse_mode="Markdown"
+                )
+                LIVE_UPTIME_MESSAGE_ID = msg.message_id
+    except Exception as e:
+        print(f"Failed to send live uptime update: {e}")
+
 def update_qr_countdown(context: CallbackContext):
     data = context.job.context
     user_id = data['user_id']
@@ -627,10 +740,10 @@ def update_qr_countdown(context: CallbackContext):
             chat_id=chat_id,
             message_id=message_id,
             caption=(
-                f"📱 **SCAN QR TO PAY**\n\n"
-                f"👤 **Name:** {user_inputs[user_id]['name']}\n"
-                f"💰 **Amount:** ₹{user_inputs[user_id]['amount']:.2f}\n"
-                f"🏦 **UPI:** `{UPI_ID}`\n\n"
+                f"📱 *SCAN QR TO PAY*\n\n"
+                f"👤 *Name:* {user_inputs[user_id]['name']}\n"
+                f"💰 *Amount:* ₹{user_inputs[user_id]['amount']:.2f}\n"
+                f"🏦 *TO UPI:* `{UPI_ID}`\n\n"
                 f"🔍 *Monitoring your payment...*\n"
                 f"⏳ {time_left_msg}"
             ),
@@ -644,8 +757,34 @@ def update_qr_countdown(context: CallbackContext):
 
 # === MAIN ===
 def main():
+    global BOT_START_TIME
+    BOT_START_TIME = datetime.datetime.now()
+
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
+    
+    # Send startup message to admin
+    try:
+        start_time_str = BOT_START_TIME.strftime("%Y-%m-%d %H:%M:%S")
+        updater.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=ADMIN_BOT_ONLINE_MESSAGE.format(start_time=start_time_str),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Could not send startup message to admin: {e}")
+
     dp = updater.dispatcher
+
+    # Add error handler
+    dp.add_error_handler(error_handler)
+
+    # Start live uptime monitoring
+    context.job_queue.run_repeating(
+        send_live_uptime_update,
+        interval=1,  # Update every second
+        first=1,     # Start immediately
+        context=updater.bot
+    )
 
     threading.Thread(target=monitor_sms, daemon=True).start()
     threading.Thread(target=auto_cleanup_unclaimed_payments, daemon=True).start()
@@ -662,10 +801,26 @@ def main():
     dp.add_handler(conv)
     dp.add_handler(CallbackQueryHandler(button_handler))
     dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("status", status_command))
 
     updater.start_polling()
     print("🤖 PayVery Bot is running...")
-    updater.idle()
+
+    try:
+        updater.idle()
+    finally:
+        # Send shutdown message to admin
+        uptime = get_uptime()
+        last_seen = datetime.datetime.now().strftime("%I:%M:%S %p")
+        try:
+            updater.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=ADMIN_BOT_OFFLINE_MESSAGE.format(uptime=uptime, last_seen=last_seen),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            print(f"Could not send shutdown message to admin: {e}")
+        print("🤖 PayVery Bot is shutting down.")
 
 if __name__ == "__main__":
     main()
