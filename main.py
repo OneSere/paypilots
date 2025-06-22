@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMe
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler, ConversationHandler
 
 # === CONFIG ===
-TELEGRAM_TOKEN = "7651343412:AAG4p7c_GxJxpUz6Q4i9zEd-9JMxFSYznvM"
+TELEGRAM_TOKEN = "7645994825:AAG2U1lMp-dy1r3r7ToLT-funzP1npIO5l0"
 FIREBASE_CONFIG = {
     "apiKey": "fake",
     "authDomain": "payvari.firebaseapp.com",
