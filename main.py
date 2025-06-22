@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMe
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler, ConversationHandler
 
 # === CONFIG ===
-TELEGRAM_TOKEN = "7645994825:AAEiDuTmIBcuc_tgbl0kKw1Auun4LXcs4NQ"
+TELEGRAM_TOKEN = "7651343412:AAG4p7c_GxJxpUz6Q4i9zEd-9JMxFSYznvM"
 FIREBASE_CONFIG = {
     "apiKey": "fake",
     "authDomain": "payvari.firebaseapp.com",
@@ -56,6 +56,30 @@ def parse_payment_sms(sms):
         return {"name": name, "amount": amount, "date": date}
     return None
 
+# === NAME MATCHING HELPER ===
+def names_match(user_name, firebase_name):
+    """Check if names match (flexible matching - first name should match)"""
+    user_name = user_name.lower().strip()
+    firebase_name = firebase_name.lower().strip()
+    
+    # Split names into words
+    user_words = user_name.split()
+    firebase_words = firebase_name.split()
+    
+    # If either name is empty, return False
+    if not user_words or not firebase_words:
+        return False
+    
+    # Check if first name matches
+    if user_words[0] == firebase_words[0]:
+        return True
+    
+    # Also check exact match for backward compatibility
+    if user_name == firebase_name:
+        return True
+    
+    return False
+
 # === MONITOR SMS ===
 def monitor_sms():
     while True:
@@ -66,11 +90,65 @@ def monitor_sms():
                     msg = value.get("message", "")
                     parsed = parse_payment_sms(msg)
                     if parsed:
+                        # Add timestamp when payment is first added
+                        parsed["timestamp"] = str(datetime.datetime.now())
                         db.child("verified_payments").push(parsed)
                     db.child("raw_sms").child(key).remove()
         except Exception as e:
             print(f"[monitor_sms error] {e}")
         time.sleep(3)
+
+# === AUTO CLEANUP UNCLAIMED PAYMENTS ===
+def auto_cleanup_unclaimed_payments():
+    """Automatically verify and delete unclaimed payments after 12 hours"""
+    while True:
+        try:
+            verified = db.child("verified_payments").get().val()
+            if verified:
+                current_time = datetime.datetime.now()
+                for key, data in verified.items():
+                    # Check if payment has timestamp, if not add one
+                    if "timestamp" not in data:
+                        data["timestamp"] = str(current_time)
+                        db.child("verified_payments").child(key).update({"timestamp": str(current_time)})
+                        continue
+                    
+                    # Parse the timestamp
+                    try:
+                        payment_time = datetime.datetime.fromisoformat(data["timestamp"].replace('Z', '+00:00'))
+                        # If timestamp is naive, assume local time
+                        if payment_time.tzinfo is None:
+                            payment_time = payment_time.replace(tzinfo=datetime.timezone.utc)
+                        
+                        # Calculate time difference
+                        time_diff = current_time.replace(tzinfo=datetime.timezone.utc) - payment_time
+                        
+                        # If more than 12 hours have passed, auto-verify and delete
+                        if time_diff.total_seconds() > 12 * 3600:  # 12 hours in seconds
+                            print(f"[AUTO CLEANUP] Auto-verifying unclaimed payment: {data['name']} - ₹{data['amount']}")
+                            
+                            # Add to auto-verified payments for record keeping
+                            db.child("auto_verified_payments").push({
+                                "name": data["name"],
+                                "amount": data["amount"],
+                                "original_timestamp": data["timestamp"],
+                                "auto_verified_at": str(current_time),
+                                "status": "auto_verified_after_12h"
+                            })
+                            
+                            # Delete from verified_payments
+                            db.child("verified_payments").child(key).remove()
+                            
+                    except Exception as e:
+                        print(f"[AUTO CLEANUP] Error processing payment {key}: {e}")
+                        # If there's an error parsing timestamp, delete the payment anyway
+                        db.child("verified_payments").child(key).remove()
+                        
+        except Exception as e:
+            print(f"[auto_cleanup_unclaimed_payments error] {e}")
+        
+        # Check every hour
+        time.sleep(3600)
 
 # === INVOICE GENERATOR ===
 def generate_invoice(user):
@@ -188,7 +266,7 @@ def realtime_verify(context: CallbackContext):
     
     if verified:
         for key, data in verified.items():
-            if data["name"].lower() == name.lower() and abs(data["amount"] - amount) < 0.01:
+            if names_match(name, data["name"]) and abs(data["amount"] - amount) < 0.01:
                 user_verified[user_id] = True
                 
                 cleanup_all_messages(user_id, context)
@@ -299,7 +377,7 @@ def button_handler(update: Update, context: CallbackContext):
         payment_found = False
         if verified:
             for key, data in verified.items():
-                if data["name"].lower() == name.lower() and abs(data["amount"] - amount) < 0.01:
+                if names_match(name, data["name"]) and abs(data["amount"] - amount) < 0.01:
                     user_verified[user_id] = True
                     payment_found = True
                     
@@ -352,6 +430,7 @@ def main():
     dp = updater.dispatcher
 
     threading.Thread(target=monitor_sms, daemon=True).start()
+    threading.Thread(target=auto_cleanup_unclaimed_payments, daemon=True).start()
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start), CommandHandler("rstart", start)],
