@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMe
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler, ConversationHandler
 
 # === CONFIG ===
-TELEGRAM_TOKEN = "7645994825:AAG2U1lMp-dy1r3r7ToLT-funzP1npIO5l0"
+TELEGRAM_TOKEN = "7645994825:AAFd7MSE8RKI4a8USEaCdnQvkkxuYIMil2U"
 FIREBASE_CONFIG = {
     "apiKey": "fake",
     "authDomain": "payvari.firebaseapp.com",
@@ -329,7 +329,7 @@ def stop_verification(context: CallbackContext):
         context.bot.send_message(
             chat_id=user_id,
             text="⏰ **Payment Session Timeout Reached**\n\n"
-                 "❌ * Payment was not completed or detected *\n\n"
+                 "❌ * Type /start To Pay Again*\n\n"
                  "🔄 *Click to check again*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -337,10 +337,10 @@ def stop_verification(context: CallbackContext):
 
 def send_restart_button(context: CallbackContext):
     user_id = context.job.context
-    keyboard = [[InlineKeyboardButton("🔁 Verify Another", callback_data="pay_again")]]
+    keyboard = [[InlineKeyboardButton("🔁 Verify ", callback_data="pay_again")]]
     context.bot.send_message(
         chat_id=user_id,
-        text="💡 **Verify another payment?**\n\n
+        text="💡 **Want to Verify another payment?**\n\n🚀 *Click to start*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -398,9 +398,9 @@ def button_handler(update: Update, context: CallbackContext):
         if not payment_found:
             context.bot.send_message(
                 chat_id=user_id,
-                text="❌ **Payment Still Not Found**\n\n"
+                text="❌ **Payment Not Found Again**\n\n"
                      "💡 *Make sure you have completed the payment*\n"
-                     "🔄 *Click /start to pay again*",
+                     "🔄 *Click /start To Pay again*",
                 parse_mode="Markdown"
             )
 
