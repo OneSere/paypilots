@@ -7,6 +7,8 @@ import uuid
 import pyrebase
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler, ConversationHandler
+from config import PAYMENT_REQUEST_TIMEOUT_SECONDS, PAYMENT_AUTO_VERIFY_WINDOW_SECONDS, PAYMENT_RETRY_LIMIT, PAYMENT_RETRY_WINDOW_SECONDS, AMOUNT_TOLERANCE, QR_TIME_LEFT_MESSAGE, HELP_MESSAGE, COUNTDOWN_UPDATE_INTERVAL_SECONDS
+import difflib
 
 # === CONFIG ===
 TELEGRAM_TOKEN = "8139748151:AAEOVSiq9tDt8DANm1Gji0nFt19FHqugAfQ"
@@ -29,6 +31,7 @@ user_verified = {}
 user_last_attempt = {}
 user_qr_sent = {}  # Track users who received QR code
 user_request_time = {}  # Track when QR was sent to user
+user_rate_limit = {}  # user_id: [timestamps]
 
 # === MESSAGE CLEANUP ===
 def cleanup_all_messages(user_id, context):
@@ -59,7 +62,7 @@ def parse_payment_sms(sms):
 
 # === NAME MATCHING HELPER ===
 def names_match(user_name, firebase_name):
-    """Check if names match (flexible matching - first name should match)"""
+    """Check if names match (flexible matching - first name should match, allow minor typos)"""
     user_name = user_name.lower().strip()
     firebase_name = firebase_name.lower().strip()
     
@@ -71,8 +74,11 @@ def names_match(user_name, firebase_name):
     if not user_words or not firebase_words:
         return False
     
-    # Check if first name matches
-    if user_words[0] == firebase_words[0]:
+    # Use difflib to allow for minor typos in first name
+    first_user = user_words[0]
+    first_firebase = firebase_words[0]
+    similarity = difflib.SequenceMatcher(None, first_user, first_firebase).ratio()
+    if similarity > 0.8:
         return True
     
     # Also check exact match for backward compatibility
@@ -200,7 +206,22 @@ def ask_name(update: Update, context: CallbackContext):
 
 def ask_amount(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
-    
+
+    # Rate limiting: max 5 requests in 10 minutes
+    now = time.time()
+    timestamps = user_rate_limit.get(user_id, [])
+    # Remove timestamps older than PAYMENT_RETRY_WINDOW_SECONDS
+    timestamps = [t for t in timestamps if now - t < PAYMENT_RETRY_WINDOW_SECONDS]
+    if len(timestamps) >= PAYMENT_RETRY_LIMIT:
+        msg = update.message.reply_text(
+            f"🚫 *Rate Limit Exceeded!*\n\nYou can only create {PAYMENT_RETRY_LIMIT} payment requests every {PAYMENT_RETRY_WINDOW_SECONDS//60} minutes. Please wait and try again.",
+            parse_mode="Markdown"
+        )
+        store_message_id(user_id, msg)
+        return ConversationHandler.END
+    timestamps.append(now)
+    user_rate_limit[user_id] = timestamps
+
     store_message_id(user_id, update.message)
     cleanup_all_messages(user_id, context)
     
@@ -213,11 +234,16 @@ def ask_amount(update: Update, context: CallbackContext):
         msg = update.message.reply_text(
             "❌ **Invalid Amount!**\n\n"
             "Enter a valid number:\n"
-            "✅ **Ex: 1 or 250.50**",
+            "✅ *Example: 1 or 250.50*",
             parse_mode="Markdown"
         )
         store_message_id(user_id, msg)
         return ASK_AMOUNT
+
+    # Show time left in QR message
+    minutes = PAYMENT_AUTO_VERIFY_WINDOW_SECONDS // 60
+    seconds = PAYMENT_AUTO_VERIFY_WINDOW_SECONDS % 60
+    time_left_msg = QR_TIME_LEFT_MESSAGE.format(minutes=minutes, seconds=seconds)
 
     msg = context.bot.send_photo(
         chat_id=user_id,
@@ -228,7 +254,7 @@ def ask_amount(update: Update, context: CallbackContext):
             f"💰 **Amount:** ₹{amount:.2f}\n"
             f"🏦 **UPI:** `{UPI_ID}`\n\n"
             f"🔍 *Monitoring your payment...*\n"
-           
+            f"⏳ {time_left_msg}"
         ),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
@@ -247,6 +273,19 @@ def ask_amount(update: Update, context: CallbackContext):
         "amount": amount,
         "timestamp": str(datetime.datetime.now())
     })
+
+    # Start live countdown updater
+    context.job_queue.run_repeating(
+        update_qr_countdown,
+        interval=COUNTDOWN_UPDATE_INTERVAL_SECONDS,
+        first=COUNTDOWN_UPDATE_INTERVAL_SECONDS,
+        context={
+            'user_id': user_id,
+            'message_id': msg.message_id,
+            'start_time': user_request_time[user_id]
+        },
+        name=f"qr_countdown_{user_id}"
+    )
 
     context.job_queue.run_repeating(realtime_verify, interval=5, first=5, context=user_id, name=str(user_id))
     context.job_queue.run_once(stop_verification, 300, context=user_id, name=str(user_id) + "_timeout")
@@ -287,7 +326,7 @@ def realtime_verify(context: CallbackContext):
     
     if verified:
         for key, data in verified.items():
-            if names_match(name, data["name"]) and abs(data["amount"] - amount) < 0.01:
+            if names_match(name, data["name"]) and abs(data["amount"] - amount) <= AMOUNT_TOLERANCE:
                 user_verified[user_id] = True
                 
                 cleanup_all_messages(user_id, context)
@@ -483,7 +522,7 @@ def button_handler(update: Update, context: CallbackContext):
         payment_found = False
         if verified:
             for key, data in verified.items():
-                if names_match(name, data["name"]) and abs(data["amount"] - amount) < 0.01:
+                if names_match(name, data["name"]) and abs(data["amount"] - amount) <= AMOUNT_TOLERANCE:
                     user_verified[user_id] = True
                     payment_found = True
                     
@@ -561,6 +600,48 @@ def button_handler(update: Update, context: CallbackContext):
 def cleanup_messages(user_id, context):
     cleanup_all_messages(user_id, context)
 
+def help_command(update: Update, context: CallbackContext):
+    update.message.reply_text(HELP_MESSAGE, parse_mode="Markdown")
+
+def update_qr_countdown(context: CallbackContext):
+    data = context.job.context
+    user_id = data['user_id']
+    message_id = data['message_id']
+    start_time = data['start_time']
+    chat_id = user_id
+    
+    # If payment is verified, cancelled, or timed out, stop updating
+    if user_verified.get(user_id) or user_id not in user_qr_sent:
+        context.job.schedule_removal()
+        return
+    elapsed = int(time.time() - start_time)
+    remaining = PAYMENT_AUTO_VERIFY_WINDOW_SECONDS - elapsed
+    if remaining <= 0:
+        context.job.schedule_removal()
+        return
+    minutes = remaining // 60
+    seconds = remaining % 60
+    time_left_msg = QR_TIME_LEFT_MESSAGE.format(minutes=minutes, seconds=seconds)
+    try:
+        context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=(
+                f"📱 **SCAN QR TO PAY**\n\n"
+                f"👤 **Name:** {user_inputs[user_id]['name']}\n"
+                f"💰 **Amount:** ₹{user_inputs[user_id]['amount']:.2f}\n"
+                f"🏦 **UPI:** `{UPI_ID}`\n\n"
+                f"🔍 *Monitoring your payment...*\n"
+                f"⏳ {time_left_msg}"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel Payment", callback_data="cancel_payment")]
+            ])
+        )
+    except Exception:
+        pass
+
 # === MAIN ===
 def main():
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
@@ -580,6 +661,7 @@ def main():
 
     dp.add_handler(conv)
     dp.add_handler(CallbackQueryHandler(button_handler))
+    dp.add_handler(CommandHandler("help", help_command))
 
     updater.start_polling()
     print("🤖 PayVery Bot is running...")
