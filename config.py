@@ -27,7 +27,7 @@ HELP_MESSAGE = (
 )
 
 # Admin and Logging
-ADMIN_CHAT_ID = "1981828128"
+ADMIN_CHAT_ID = "7906046347"
 ADMIN_BOT_ONLINE_MESSAGE = "✅ *PayPilotsBot is LIVE!*\nStart Time: {start_time}"
 ADMIN_BOT_OFFLINE_MESSAGE = "❌ *PayPilotsBot is DOWN!*\nTotal Uptime: {uptime}\nLast seen: {last_seen}"
 ADMIN_ERROR_MESSAGE = "🚨 *An error occurred!*\n\n*User:* {user}\n*Error:* ```{error}```"
