@@ -716,7 +716,7 @@ def status_command(update: Update, context: CallbackContext):
     update.message.reply_text(status_message, parse_mode="Markdown")
 
 def send_live_uptime_update(context: CallbackContext):
-    """Send live uptime update to admin by editing a single message. After 5 minutes, send a new message and delete the old one. If editing fails, always send a new message."""
+    """Adaptive: Try to edit the live uptime message every second. If editing fails, delete and send a new message, then continue editing the new one."""
     global LIVE_UPTIME_MESSAGE_ID, LIVE_UPTIME_MESSAGE_START, BOT_START_TIME
     try:
         uptime = get_uptime()
@@ -743,8 +743,17 @@ def send_live_uptime_update(context: CallbackContext):
             LIVE_UPTIME_MESSAGE_ID = msg.message_id
             LIVE_UPTIME_MESSAGE_START = now
         else:
-            # If the message is older than 5 minutes, send a new one and delete the old
-            if now - LIVE_UPTIME_MESSAGE_START > LIVE_UPTIME_MESSAGE_DURATION:
+            # Always try to edit the existing message
+            try:
+                context.bot.edit_message_text(
+                    chat_id=ADMIN_CHAT_ID,
+                    message_id=LIVE_UPTIME_MESSAGE_ID,
+                    text=live_message,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                # If editing fails, delete the old message and send a new one
                 try:
                     context.bot.delete_message(chat_id=ADMIN_CHAT_ID, message_id=LIVE_UPTIME_MESSAGE_ID)
                 except Exception:
@@ -757,25 +766,6 @@ def send_live_uptime_update(context: CallbackContext):
                 )
                 LIVE_UPTIME_MESSAGE_ID = msg.message_id
                 LIVE_UPTIME_MESSAGE_START = now
-            else:
-                # Try to edit the existing message, if it fails, send a new one
-                try:
-                    context.bot.edit_message_text(
-                        chat_id=ADMIN_CHAT_ID,
-                        message_id=LIVE_UPTIME_MESSAGE_ID,
-                        text=live_message,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
-                except Exception:
-                    msg = context.bot.send_message(
-                        chat_id=ADMIN_CHAT_ID,
-                        text=live_message,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
-                    LIVE_UPTIME_MESSAGE_ID = msg.message_id
-                    LIVE_UPTIME_MESSAGE_START = now
     except Exception as e:
         print(f"Failed to send live uptime update: {e}")
 
@@ -844,7 +834,7 @@ def main():
     # Start live uptime monitoring
     updater.job_queue.run_repeating(
         send_live_uptime_update,
-        interval=1,  # Update every second
+        interval=3,  # Update every 3 seconds
         first=1,     # Start immediately
         context=updater.bot
     )
