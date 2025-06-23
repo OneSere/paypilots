@@ -71,6 +71,8 @@ user_rate_limit = {}  # user_id: [timestamps]
 # === ADMIN & LOGGING GLOBALS ===
 BOT_START_TIME = None
 LIVE_UPTIME_MESSAGE_ID = None  # Store the message ID of the live uptime message
+LIVE_UPTIME_MESSAGE_START = None  # Store the time the current live message was sent
+LIVE_UPTIME_MESSAGE_DURATION = 300  # 5 minutes in seconds
 
 # === MESSAGE CLEANUP ===
 def cleanup_all_messages(user_id, context):
@@ -477,6 +479,14 @@ def button_handler(update: Update, context: CallbackContext):
     user_id = query.from_user.id
     query.answer()
 
+    if query.data == "reset_uptime":
+        global BOT_START_TIME, LIVE_UPTIME_MESSAGE_START
+        BOT_START_TIME = datetime.datetime.now()
+        LIVE_UPTIME_MESSAGE_START = time.time()  # Keep the current message, just reset uptime
+        # Immediately update the live message
+        send_live_uptime_update(context)
+        return
+
     if query.data == "verify_again":
         cleanup_all_messages(user_id, context)
         
@@ -706,43 +716,56 @@ def status_command(update: Update, context: CallbackContext):
     update.message.reply_text(status_message, parse_mode="Markdown")
 
 def send_live_uptime_update(context: CallbackContext):
-    """Send live uptime update to admin by editing a single message."""
-    global LIVE_UPTIME_MESSAGE_ID
+    """Send live uptime update to admin by editing a single message. After 5 minutes, send a new message and delete the old one."""
+    global LIVE_UPTIME_MESSAGE_ID, LIVE_UPTIME_MESSAGE_START, BOT_START_TIME
     try:
         uptime = get_uptime()
         # Use Indian timezone (IST) with 24-hour format
         current_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).strftime("%H:%M:%S")
+        now = time.time()
         
         live_message = ADMIN_LIVE_UPTIME_MESSAGE.format(
             uptime=uptime,
             current_time=current_time
         )
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Reset Uptime", callback_data="reset_uptime")]
+        ])
         
         # If we don't have a message ID yet, send the first message
-        if LIVE_UPTIME_MESSAGE_ID is None:
+        if LIVE_UPTIME_MESSAGE_ID is None or LIVE_UPTIME_MESSAGE_START is None:
             msg = context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=live_message,
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=reply_markup
             )
             LIVE_UPTIME_MESSAGE_ID = msg.message_id
+            LIVE_UPTIME_MESSAGE_START = now
         else:
-            # Edit the existing message
-            try:
+            # If the message is older than 5 minutes, send a new one and delete the old
+            if now - LIVE_UPTIME_MESSAGE_START > LIVE_UPTIME_MESSAGE_DURATION:
+                try:
+                    context.bot.delete_message(chat_id=ADMIN_CHAT_ID, message_id=LIVE_UPTIME_MESSAGE_ID)
+                except Exception:
+                    pass
+                msg = context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=live_message,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+                LIVE_UPTIME_MESSAGE_ID = msg.message_id
+                LIVE_UPTIME_MESSAGE_START = now
+            else:
+                # Edit the existing message
                 context.bot.edit_message_text(
                     chat_id=ADMIN_CHAT_ID,
                     message_id=LIVE_UPTIME_MESSAGE_ID,
                     text=live_message,
-                    parse_mode="Markdown"
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
                 )
-            except Exception:
-                # If editing fails (message too old), send a new one
-                msg = context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=live_message,
-                    parse_mode="Markdown"
-                )
-                LIVE_UPTIME_MESSAGE_ID = msg.message_id
     except Exception as e:
         print(f"Failed to send live uptime update: {e}")
 
