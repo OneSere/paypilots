@@ -189,17 +189,18 @@ def auto_cleanup_unclaimed_payments():
 # === INVOICE GENERATOR ===
 def generate_invoice(user):
     invoice_id = uuid.uuid4().hex[:8].upper()
-    date_time = datetime.datetime.now()
+    # Use IST (UTC+5:30) for date and time
+    ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    date_time = datetime.datetime.now(ist)
     formatted_date = date_time.strftime("%d %B %Y")
-    formatted_time = date_time.strftime("%I:%M %p")
-    
+    formatted_time = date_time.strftime("%H:%M")  # 24-hour format as per previous admin requests
     return (
         f"🎉 *PAYMENT SUCCESSFUL*\n\n"
         f"📋 *PAYMENT INVOICE*\n"
         f"👤 *Name:* `{user['name']}`\n"
         f"💰 *Amount:* `₹{user['amount']:.2f}`\n"
         f"📅 *Date:* {formatted_date}\n"
-        f"🕐 *Time:* {formatted_time}\n"
+        f"🕐 *Time:* {formatted_time} IST\n"
         f"🆔 *ID:* `{invoice_id}`\n\n"
         f"✅ *Payment Was Verified By @paypilotsbot*\n"
         f"💡 **Keep this invoice for records**"
@@ -482,7 +483,7 @@ def button_handler(update: Update, context: CallbackContext):
         BOT_START_TIME = datetime.datetime.now()
         LAST_UPTIME_MESSAGE_TIME = time.time()  # Keep the current message, just reset uptime
         # Immediately update the live message
-        send_periodic_uptime_message(context)
+        send_periodic_uptime_message(CallbackContext.from_bot(context.bot))
         return
 
     if query.data == "verify_again":
@@ -717,7 +718,7 @@ def status_command(update: Update, context: CallbackContext):
     )
     update.message.reply_text(status_message, parse_mode="Markdown")
 
-def send_periodic_uptime_message(context: CallbackContext):
+def send_periodic_uptime_message(context: CallbackContext = None):
     """Send a new uptime message every 5 minutes, deleting the previous one."""
     global LAST_UPTIME_MESSAGE_ID, LAST_UPTIME_MESSAGE_TIME, BOT_START_TIME
     try:
@@ -812,10 +813,17 @@ def uptime_command(update: Update, context: CallbackContext):
 def main():
     global BOT_START_TIME
     BOT_START_TIME = datetime.datetime.now()
-
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
-    
-    # Send startup message to admin
+    dp = updater.dispatcher
+    # Add error handler
+    dp.add_error_handler(error_handler)
+    # Start periodic uptime monitoring (every 5 minutes)
+    updater.job_queue.run_repeating(
+        send_periodic_uptime_message,
+        interval=UPTIME_MESSAGE_INTERVAL,
+        first=1
+    )
+    # Send startup message to admin and set initial uptime message
     try:
         start_time_str = BOT_START_TIME.strftime("%Y-%m-%d %H:%M:%S")
         updater.bot.send_message(
@@ -823,21 +831,10 @@ def main():
             text=ADMIN_BOT_ONLINE_MESSAGE.format(start_time=start_time_str),
             parse_mode="Markdown"
         )
+        # Send the first live uptime message immediately
+        send_periodic_uptime_message(CallbackContext.from_bot(updater.bot))
     except Exception as e:
         print(f"Could not send startup message to admin: {e}")
-
-    dp = updater.dispatcher
-
-    # Add error handler
-    dp.add_error_handler(error_handler)
-
-    # Start periodic uptime monitoring (every 5 minutes)
-    updater.job_queue.run_repeating(
-        send_periodic_uptime_message,
-        interval=UPTIME_MESSAGE_INTERVAL,
-        first=1,
-        context=updater.bot
-    )
 
     threading.Thread(target=monitor_sms, daemon=True).start()
     threading.Thread(target=auto_cleanup_unclaimed_payments, daemon=True).start()
