@@ -788,6 +788,28 @@ def update_qr_countdown(context: CallbackContext):
     except Exception:
         pass
 
+def uptime_command(update: Update, context: CallbackContext):
+    user_id = str(update.message.from_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        update.message.reply_text("⛔ Sorry, this is an admin-only command.")
+        return
+    global LAST_UPTIME_MESSAGE_ID, LAST_UPTIME_MESSAGE_TIME
+    uptime = get_uptime()
+    current_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).strftime("%H:%M:%S")
+    uptime_message = ADMIN_LIVE_UPTIME_MESSAGE.format(
+        uptime=uptime,
+        current_time=current_time
+    )
+    # Delete the previous uptime message if it exists
+    if LAST_UPTIME_MESSAGE_ID is not None:
+        try:
+            context.bot.delete_message(chat_id=ADMIN_CHAT_ID, message_id=LAST_UPTIME_MESSAGE_ID)
+        except Exception:
+            pass
+    msg = update.message.reply_text(uptime_message, parse_mode="Markdown")
+    LAST_UPTIME_MESSAGE_ID = msg.message_id
+    LAST_UPTIME_MESSAGE_TIME = time.time()
+
 # === MAIN ===
 def main():
     global BOT_START_TIME
@@ -835,6 +857,7 @@ def main():
     dp.add_handler(CallbackQueryHandler(button_handler))
     dp.add_handler(CommandHandler("help", help_command))
     dp.add_handler(CommandHandler("status", status_command))
+    dp.add_handler(CommandHandler("uptime", uptime_command))
 
     updater.start_polling()
     print("🤖 PayVery Bot is running...")
