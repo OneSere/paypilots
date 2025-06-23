@@ -716,7 +716,7 @@ def status_command(update: Update, context: CallbackContext):
     update.message.reply_text(status_message, parse_mode="Markdown")
 
 def send_live_uptime_update(context: CallbackContext):
-    """Send live uptime update to admin by editing a single message. After 5 minutes, send a new message and delete the old one."""
+    """Send live uptime update to admin by editing a single message. After 5 minutes, send a new message and delete the old one. If editing fails, always send a new message."""
     global LIVE_UPTIME_MESSAGE_ID, LIVE_UPTIME_MESSAGE_START, BOT_START_TIME
     try:
         uptime = get_uptime()
@@ -758,14 +758,24 @@ def send_live_uptime_update(context: CallbackContext):
                 LIVE_UPTIME_MESSAGE_ID = msg.message_id
                 LIVE_UPTIME_MESSAGE_START = now
             else:
-                # Edit the existing message
-                context.bot.edit_message_text(
-                    chat_id=ADMIN_CHAT_ID,
-                    message_id=LIVE_UPTIME_MESSAGE_ID,
-                    text=live_message,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
+                # Try to edit the existing message, if it fails, send a new one
+                try:
+                    context.bot.edit_message_text(
+                        chat_id=ADMIN_CHAT_ID,
+                        message_id=LIVE_UPTIME_MESSAGE_ID,
+                        text=live_message,
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup
+                    )
+                except Exception:
+                    msg = context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=live_message,
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup
+                    )
+                    LIVE_UPTIME_MESSAGE_ID = msg.message_id
+                    LIVE_UPTIME_MESSAGE_START = now
     except Exception as e:
         print(f"Failed to send live uptime update: {e}")
 
