@@ -8,6 +8,7 @@ import pyrebase
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler, ConversationHandler
 import difflib
+import traceback
 
 # === CONFIG ===
 TELEGRAM_TOKEN = "8139748151:AAEOVSiq9tDt8DANm1Gji0nFt19FHqugAfQ"
@@ -204,6 +205,20 @@ def generate_invoice(user):
         f"💡 **Keep this invoice for records**"
     )
 
+# === USER BROADCAST UTILS ===
+def register_user(user_id, name=None):
+    """Register user in Firebase if not already present."""
+    user_ref = db.child("users").child(str(user_id))
+    user_data = user_ref.get().val()
+    if not user_data:
+        user_ref.set({"status": "new", "name": name or ""})
+    elif name and not user_data.get("name"):
+        user_ref.update({"name": name})
+
+def mark_user_old(user_id):
+    """Mark user as 'old' in Firebase."""
+    db.child("users").child(str(user_id)).update({"status": "old"})
+
 # === USER FLOW ===
 def start(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
@@ -211,17 +226,16 @@ def start(update: Update, context: CallbackContext):
     if now - user_last_attempt.get(user_id, 0) < 5:
         update.message.reply_text("⏳ Please wait before starting again.")
         return ConversationHandler.END
-    
     user_last_attempt[user_id] = now
     user_messages[user_id] = []
     user_verified[user_id] = False
-    
     store_message_id(user_id, update.message)
-    
+    # Register user in Firebase
+    register_user(user_id)
     msg = update.message.reply_text(
         "🚀 *Welcome to PayPilots!*\n"
         "**This is a Private Telegram bot that securely confirms payments in realtime, insuring fast transactions for the clients of @curiositymind**\n\n"
-       "*💡Lets Start! ✅*\n"
+        "*💡Lets Start! ✅*\n"
         "👤 Please enter your **full name**:",
         parse_mode="Markdown"
     )
@@ -230,12 +244,11 @@ def start(update: Update, context: CallbackContext):
 
 def ask_name(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
-    
     store_message_id(user_id, update.message)
     cleanup_all_messages(user_id, context)
-    
     user_inputs[user_id] = {"name": update.message.text.strip()}
-    
+    # Update name in Firebase user record
+    register_user(user_id, name=user_inputs[user_id]["name"])
     msg = update.message.reply_text(
         f"👋 **Hello {user_inputs[user_id]['name']}!**\n\n"
         "💰 *Enter the **amount** to pay (₹)*:\n"
@@ -262,7 +275,7 @@ def ask_amount(update: Update, context: CallbackContext):
         return ConversationHandler.END
     timestamps.append(now)
     user_rate_limit[user_id] = timestamps
-
+    
     store_message_id(user_id, update.message)
     cleanup_all_messages(user_id, context)
     
@@ -391,6 +404,9 @@ def realtime_verify(context: CallbackContext):
                 context.bot.send_message(chat_id=user_id, text=generate_invoice(user), parse_mode="Markdown")
                 
                 db.child("verified_payments").child(key).remove()
+                
+                # Mark user as old in Firebase
+                mark_user_old(user_id)
                 
                 # Cancel both the verification job and timeout job
                 context.job.schedule_removal()
@@ -564,7 +580,7 @@ def button_handler(update: Update, context: CallbackContext):
             context.bot.delete_message(chat_id=user_id, message_id=checking_msg.message_id)
         except:
             pass
-        
+            
         # Re-check payment immediately
         user = user_inputs.get(user_id, {})
         name = user.get("name", "")
@@ -810,6 +826,54 @@ def uptime_command(update: Update, context: CallbackContext):
     LAST_UPTIME_MESSAGE_ID = msg.message_id
     LAST_UPTIME_MESSAGE_TIME = time.time()
 
+# === BROADCAST COMMANDS ===
+def broadcast_all_command(update: Update, context: CallbackContext):
+    user_id = str(update.message.from_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        update.message.reply_text("⛔ Sorry, this is an admin-only command.")
+        return
+    if not context.args:
+        update.message.reply_text("Usage: /all <message>")
+        return
+    message = update.message.text.partition(" ")[2].strip()
+    users = db.child("users").get().val()
+    if not users:
+        update.message.reply_text("No users found.")
+        return
+    count = 0
+    for uid in users:
+        try:
+            context.bot.send_message(chat_id=int(uid), text=message)
+            count += 1
+            time.sleep(0.05)  # avoid rate limit
+        except Exception as e:
+            continue
+    update.message.reply_text(f"Broadcast sent to {count} users.")
+
+def broadcast_new_command(update: Update, context: CallbackContext):
+    user_id = str(update.message.from_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        update.message.reply_text("⛔ Sorry, this is an admin-only command.")
+        return
+    if not context.args:
+        update.message.reply_text("Usage: /new <message>")
+        return
+    message = update.message.text.partition(" ")[2].strip()
+    users = db.child("users").get().val()
+    if not users:
+        update.message.reply_text("No users found.")
+        return
+    count = 0
+    for uid, data in users.items():
+        if data.get("status", "new") == "new":
+            try:
+                context.bot.send_message(chat_id=int(uid), text=message)
+                count += 1
+                time.sleep(0.05)
+            except Exception as e:
+                continue
+    update.message.reply_text(f"Broadcast sent to {count} new users.")
+
 # === MAIN ===
 def main():
     global BOT_START_TIME
@@ -858,6 +922,8 @@ def main():
     dp.add_handler(CommandHandler("help", help_command))
     dp.add_handler(CommandHandler("status", status_command))
     dp.add_handler(CommandHandler("uptime", uptime_command))
+    dp.add_handler(CommandHandler("all", broadcast_all_command, pass_args=True))
+    dp.add_handler(CommandHandler("new", broadcast_new_command, pass_args=True))
 
     updater.start_polling()
     print("🤖 PayVery Bot is running...")
