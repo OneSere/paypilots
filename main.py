@@ -70,9 +70,9 @@ user_rate_limit = {}  # user_id: [timestamps]
 
 # === ADMIN & LOGGING GLOBALS ===
 BOT_START_TIME = None
-LIVE_UPTIME_MESSAGE_ID = None  # Store the message ID of the live uptime message
-LIVE_UPTIME_MESSAGE_START = None  # Store the time the current live message was sent
-LIVE_UPTIME_MESSAGE_DURATION = 300  # 5 minutes in seconds
+LAST_UPTIME_MESSAGE_ID = None  # Store the message ID of the last uptime message
+LAST_UPTIME_MESSAGE_TIME = None  # Store the time the last uptime message was sent
+UPTIME_MESSAGE_INTERVAL = 300  # 5 minutes in seconds
 
 # === MESSAGE CLEANUP ===
 def cleanup_all_messages(user_id, context):
@@ -299,7 +299,10 @@ def ask_amount(update: Update, context: CallbackContext):
         ),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel Payment", callback_data="cancel_payment")]
+            [
+                InlineKeyboardButton("❌ Cancel Payment", callback_data="cancel_payment"),
+                InlineKeyboardButton("❓ FAQ", callback_data="show_faq")
+            ]
         ])
     )
     store_message_id(user_id, msg)
@@ -480,11 +483,11 @@ def button_handler(update: Update, context: CallbackContext):
     query.answer()
 
     if query.data == "reset_uptime":
-        global BOT_START_TIME, LIVE_UPTIME_MESSAGE_START
+        global BOT_START_TIME, LAST_UPTIME_MESSAGE_TIME
         BOT_START_TIME = datetime.datetime.now()
-        LIVE_UPTIME_MESSAGE_START = time.time()  # Keep the current message, just reset uptime
+        LAST_UPTIME_MESSAGE_TIME = time.time()  # Keep the current message, just reset uptime
         # Immediately update the live message
-        send_live_uptime_update(context)
+        send_periodic_uptime_message(context)
         return
 
     if query.data == "verify_again":
@@ -658,6 +661,10 @@ def button_handler(update: Update, context: CallbackContext):
         )
         return
 
+    elif query.data == "show_faq":
+        context.bot.send_message(chat_id=user_id, text=HELP_MESSAGE, parse_mode="Markdown")
+        return
+
 def cleanup_messages(user_id, context):
     cleanup_all_messages(user_id, context)
 
@@ -715,59 +722,32 @@ def status_command(update: Update, context: CallbackContext):
     )
     update.message.reply_text(status_message, parse_mode="Markdown")
 
-def send_live_uptime_update(context: CallbackContext):
-    """Adaptive: Try to edit the live uptime message every second. If editing fails, delete and send a new message, then continue editing the new one."""
-    global LIVE_UPTIME_MESSAGE_ID, LIVE_UPTIME_MESSAGE_START, BOT_START_TIME
+def send_periodic_uptime_message(context: CallbackContext):
+    """Send a new uptime message every 5 minutes, deleting the previous one."""
+    global LAST_UPTIME_MESSAGE_ID, LAST_UPTIME_MESSAGE_TIME, BOT_START_TIME
     try:
         uptime = get_uptime()
-        # Use Indian timezone (IST) with 24-hour format
         current_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).strftime("%H:%M:%S")
         now = time.time()
-        
-        live_message = ADMIN_LIVE_UPTIME_MESSAGE.format(
+        uptime_message = ADMIN_LIVE_UPTIME_MESSAGE.format(
             uptime=uptime,
             current_time=current_time
         )
-        reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Reset Uptime", callback_data="reset_uptime")]
-        ])
-        
-        # If we don't have a message ID yet, send the first message
-        if LIVE_UPTIME_MESSAGE_ID is None or LIVE_UPTIME_MESSAGE_START is None:
-            msg = context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=live_message,
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
-            LIVE_UPTIME_MESSAGE_ID = msg.message_id
-            LIVE_UPTIME_MESSAGE_START = now
-        else:
-            # Always try to edit the existing message
+        # Delete the previous message if it exists
+        if LAST_UPTIME_MESSAGE_ID is not None:
             try:
-                context.bot.edit_message_text(
-                    chat_id=ADMIN_CHAT_ID,
-                    message_id=LIVE_UPTIME_MESSAGE_ID,
-                    text=live_message,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
+                context.bot.delete_message(chat_id=ADMIN_CHAT_ID, message_id=LAST_UPTIME_MESSAGE_ID)
             except Exception:
-                # If editing fails, delete the old message and send a new one
-                try:
-                    context.bot.delete_message(chat_id=ADMIN_CHAT_ID, message_id=LIVE_UPTIME_MESSAGE_ID)
-                except Exception:
-                    pass
-                msg = context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=live_message,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
-                LIVE_UPTIME_MESSAGE_ID = msg.message_id
-                LIVE_UPTIME_MESSAGE_START = now
+                pass
+        msg = context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=uptime_message,
+            parse_mode="Markdown"
+        )
+        LAST_UPTIME_MESSAGE_ID = msg.message_id
+        LAST_UPTIME_MESSAGE_TIME = now
     except Exception as e:
-        print(f"Failed to send live uptime update: {e}")
+        print(f"Failed to send periodic uptime message: {e}")
 
 def update_qr_countdown(context: CallbackContext):
     data = context.job.context
@@ -831,11 +811,11 @@ def main():
     # Add error handler
     dp.add_error_handler(error_handler)
 
-    # Start live uptime monitoring
+    # Start periodic uptime monitoring (every 5 minutes)
     updater.job_queue.run_repeating(
-        send_live_uptime_update,
-        interval=3,  # Update every 3 seconds
-        first=1,     # Start immediately
+        send_periodic_uptime_message,
+        interval=UPTIME_MESSAGE_INTERVAL,
+        first=1,
         context=updater.bot
     )
 
