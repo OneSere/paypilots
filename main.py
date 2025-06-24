@@ -11,7 +11,7 @@ import difflib
 import traceback
 
 # === CONFIG ===
-TELEGRAM_TOKEN = "8139748151:AAEOVSiq9tDt8DANm1Gji0nFt19FHqugAfQ"
+TELEGRAM_TOKEN = "7687841907:AAEI4et6WzzAXJBWN27mhyez8iSbGQX0a10"
 FIREBASE_CONFIG = {
     "apiKey": "fake",
     "authDomain": "payvari.firebaseapp.com",
